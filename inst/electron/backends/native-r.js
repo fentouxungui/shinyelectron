@@ -14,6 +14,7 @@ class NativeRBackend extends EventEmitter {
   constructor() {
     super();
     this.rProcess = null;
+    this.stopping = false;
   }
 
   /**
@@ -204,6 +205,7 @@ class NativeRBackend extends EventEmitter {
    * @returns {Promise<{port: number}>} Resolves when the Shiny server is ready.
    */
   async start({ appPath, port, config }) {
+    this.stopping = false;
     // Clear only this backend's one-shot interactive handlers from a prior
     // start(); do NOT removeAllListeners(), which would also wipe the main
     // process's 'status'/'error' subscribers and freeze the lifecycle UI.
@@ -469,6 +471,9 @@ class NativeRBackend extends EventEmitter {
 
       this.rProcess.on('close', (code) => {
         this.rProcess = null;
+        // Intentional shutdown (stop()/quit) kills the child, which exits
+        // non-zero; do not report that as a crash.
+        if (this.stopping) return;
         if (code !== null && code !== 0) {
           const msg = `R process exited unexpectedly (code ${code})`;
           console.error(msg);
@@ -517,6 +522,7 @@ class NativeRBackend extends EventEmitter {
    * Stop the native R Shiny server.
    */
   stop() {
+    this.stopping = true;
     this.emit('status', { phase: 'stopping_server', message: 'Stopping R server...' });
     if (this.rProcess) {
       logDebug('Stopping R Shiny server...');
