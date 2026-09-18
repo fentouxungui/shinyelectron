@@ -31,6 +31,7 @@ MANIFEST_SCHEMA_VERSION <- "2"
 #'   \item{signing}{Default code-signing settings}
 #'   \item{lifecycle}{Default lifecycle and prompt settings}
 #'   \item{installer}{Default installer branding settings}
+#'   \item{optimize}{Default pruning of build-only files from bundled runtimes}
 #'   \item{runtime_versions}{Maintained "latest known" runtime version pins (r, python, electron)}
 #'   \item{electron_toolchain}{Pinned versions for electron-builder, electron-updater, electron-log (not config-settable)}
 #'   \item{dependencies$electron}{Default Electron dependency settings; \code{version} is NULL (use pin) or a version string}
@@ -221,5 +222,10 @@ SHINYELECTRON_DEFAULTS <- list(
     one_click = TRUE,
     allow_to_change_installation_directory = NULL,
     per_machine = NULL
+  ),
+
+  optimize = list(
+    r_library = TRUE,
+    r_runtime = TRUE
   )
 )

@@ -6,7 +6,8 @@ export_multi_app <- function(appdir, destdir, config,
                               platform = NULL, arch = NULL, icon = NULL,
                               overwrite = FALSE, build = TRUE,
                               run_after = FALSE, open_after = FALSE,
-                              verbose = TRUE) {
+                              verbose = TRUE,
+                              prune_r_library = NULL, prune_r_runtime = NULL) {
 
   app_name <- app_name %||% config$app$name %||% basename(appdir)
   validate_app_name(app_name)
@@ -26,6 +27,10 @@ export_multi_app <- function(appdir, destdir, config,
   # resolve_app_strategy() and validate_suite_strategies() use the caller's
   # choice for every app that does not set its own per-app runtime_strategy.
   config$build$runtime_strategy <- runtime_strategy
+
+  # Runtime pruning: argument > config `optimize:` > default TRUE.
+  prune_r_library <- prune_r_library %||% config$optimize$r_library %||% TRUE
+  prune_r_runtime <- prune_r_runtime %||% config$optimize$r_runtime %||% TRUE
 
   if (verbose) {
     cli::cli_h1("Exporting multi-app Shiny suite to Electron")
@@ -346,7 +351,9 @@ build_multi_app <- function(apps_dir, output_dir, app_name,
       version = resolve_runtime_version("r", config),
       platform = platform[1],
       arch = arch[1],
-      verbose = verbose
+      verbose = verbose,
+      prune_r_library = prune_r_library,
+      prune_r_runtime = prune_r_runtime
     )
   }
   if (py_bundled) {
