@@ -16,7 +16,7 @@ Description: Provides tools to export 'Shiny' applications written in 'R' or
 License: AGPL (>= 3)
 URL: https://r-pkg.thecoatlessprofessor.com/shinyelectron/, https://github.com/coatless-rpkg/shinyelectron
 BugReports: https://github.com/coatless-rpkg/shinyelectron/issues
-Depends: R (>= 4.4.0)
+Depends: R (>= 4.5.0)
 Imports:
     cli (>= 3.6.6),
     fs (>= 2.1.0),
