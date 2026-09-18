@@ -42,7 +42,7 @@ function waitForServer(port, { timeout = 30000, interval = 500 } = {}) {
         }
       });
 
-      req.setTimeout(1000, () => {
+      req.setTimeout(8000, () => {
         req.destroy();
         if (Date.now() - start > timeout) {
           reject(new Error(`Server on port ${port} did not start within ${timeout}ms`));

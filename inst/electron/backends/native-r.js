@@ -483,7 +483,7 @@ class NativeRBackend extends EventEmitter {
         }
       });
 
-      waitForServer(actualPort, { timeout: 60000, interval: 500 })
+      waitForServer(actualPort, { timeout: 180000, interval: 500 })
         .then(() => {
           if (settled) return;
           logDebug(`R Shiny server ready on http://localhost:${actualPort}`);
