@@ -17,11 +17,13 @@
 #' @param verbose Logical. Whether to display progress.
 #' @param prune_r_library Logical. Prune build-only files (include/, tests/, examples/) from the bundled package library.
 #' @param prune_r_runtime Logical. Prune doc/, tests/ and include/ from the portable R distribution.
+#' @param local_packages Character vector. Paths to local R package source directories or archives to install into the bundled library after the repository packages.
 #' @return Invisibly, the path to the embedded `runtime/R` directory.
 #' @keywords internal
 embed_r_runtime <- function(output_dir, packages, repos, version,
                             platform, arch, verbose = TRUE,
-                            prune_r_library = TRUE, prune_r_runtime = TRUE) {
+                            prune_r_library = TRUE, prune_r_runtime = TRUE,
+                            local_packages = character(0)) {
   if (verbose) cli::cli_alert_info("Embedding R runtime for bundled strategy...")
 
   # Resolve the effective version ONCE and pass it to both install_r_portable and
@@ -58,11 +60,18 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
     }
   }
 
+  local_packages <- unlist(local_packages)
+  local_names <- local_r_package_names(local_packages)
+  # Local packages may not be part of the detected/repo set; resolve their
+  # declared dependencies explicitly so they are installed first.
+  local_declared <- local_r_package_deps(local_packages)
+  direct_pkgs <- unique(c(unlist(packages), local_names, local_declared))
+
   # Install packages using the BUNDLED portable R itself (not the cache,
   # and not system R). This ensures binary packages are linked against
   # matching dylibs AND are installed into the exact library the app
   # will load from at runtime.
-  if (length(packages) > 0) {
+  if (length(direct_pkgs) > 0) {
 
     # Install into a SIBLING library directory (runtime_dest/library/),
     # NOT into portable-r-*/library/. On macOS, installing into the
@@ -92,7 +101,7 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
 
     if (verbose) cli::cli_alert_info("Installing packages with bundled R...")
 
-    pkgs <- unlist(packages)
+    pkgs <- direct_pkgs
     repos <- unlist(repos)
 
     # Fetch the available-packages database once (avoids repeated
@@ -113,7 +122,7 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
     # errors when antivirus held file handles on freshly-extracted DLLs.
     pre_installed <- list.dirs(lib_path, recursive = FALSE, full.names = FALSE)
     pre_installed <- pre_installed[nzchar(pre_installed)]
-    all_pkgs <- setdiff(all_pkgs, pre_installed)
+    all_pkgs <- setdiff(all_pkgs, c(pre_installed, local_names))
 
     if (length(all_pkgs) == 0) {
       if (verbose) cli::cli_alert_info("All dependencies already present in bundled R library")
@@ -165,7 +174,7 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
       # than "no package called 'htmltools'" from a running Shiny server.
       present <- c(pre_installed,
                    list.dirs(lib_path, recursive = FALSE, full.names = FALSE))
-      missing_pkgs <- setdiff(pkgs, present)
+      missing_pkgs <- setdiff(pkgs, c(present, local_names))
       if (length(missing_pkgs) > 0) {
         cli::cli_abort(c(
           "Failed to install bundled R packages: {paste(missing_pkgs, collapse = ', ')}",
@@ -177,6 +186,35 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
     }
   }
 
+  # Install any user-supplied local R package sources AFTER the repository
+  # packages, so a local build overrides a same-named package from CRAN.
+  if (length(local_packages) > 0) {
+    local_lib <- fs::path(runtime_dest, "library")
+    fs::dir_create(local_lib, recurse = TRUE)
+
+    local_rscript <- r_executable(
+      version = effective_version,
+      platform = platform,
+      arch = arch
+    )
+    if (is.null(local_rscript) || !fs::file_exists(local_rscript)) {
+      cli::cli_abort(c(
+        "Could not locate the cached portable Rscript",
+        "i" = "Try: {.code shinyelectron::install_r_portable(force = TRUE)}"
+      ))
+    }
+
+    install_local_r_packages(local_rscript, local_packages, local_lib,
+                             verbose = verbose)
+
+    present_local <- list.dirs(local_lib, recursive = FALSE, full.names = FALSE)
+    missing_local <- setdiff(local_names, present_local)
+    if (length(missing_local) > 0) {
+      cli::cli_abort(
+        "Failed to install local R package(s): {paste(missing_local, collapse = ', ')}"
+      )
+    }
+  }
   # Trim compile-only / documentation files so the installer has far fewer
   # entries to unpack. Only allowlisted names are removed (see
   # prune-runtime.R); runtime-critical files are never touched.
@@ -262,3 +300,177 @@ embed_python_runtime <- function(output_dir, packages, index_urls, version,
   invisible(runtime_dest)
 }
 
+
+#' Resolve the package names of local R package paths
+#'
+#' Accepts a mix of source directories (with a `DESCRIPTION`) and
+#' `<pkg>_<version>.<ext>` archives, returning the `Package` name for each.
+#'
+#' @param paths Character vector. Paths to local package directories or archives.
+#' @return Character vector of package names (empty when `paths` is empty).
+#' @keywords internal
+local_r_package_names <- function(paths) {
+  paths <- unlist(paths)
+  if (length(paths) == 0) {
+    return(character(0))
+  }
+  vapply(
+    paths,
+    function(p) {
+      desc <- fs::path(p, "DESCRIPTION")
+      if (fs::dir_exists(p) && fs::file_exists(desc)) {
+        read.dcf(desc, fields = "Package")[[1]]
+      } else {
+        sub("_[0-9][^_]*$", "", fs::path_file(p))
+      }
+    },
+    character(1),
+    USE.NAMES = FALSE
+  )
+}
+
+#' Resolve the declared dependencies of local R package paths
+#'
+#' Reads `Depends`, `Imports` and `LinkingTo` from each local package's
+#' `DESCRIPTION` so the repository install step can install them before the
+#' local package is installed from source. Version constraints and `R` are
+#' stripped, and base/recommended packages are dropped.
+#'
+#' @param paths Character vector. Paths to local package directories or archives.
+#' @return Character vector of dependency package names.
+#' @keywords internal
+local_r_package_deps <- function(paths) {
+  paths <- unlist(paths)
+  if (length(paths) == 0) {
+    return(character(0))
+  }
+  fields <- c("Depends", "Imports", "LinkingTo")
+  deps <- character(0)
+  for (p in paths) {
+    desc <- fs::path(p, "DESCRIPTION")
+    if (!fs::file_exists(desc)) {
+      next
+    }
+    dcf <- tryCatch(read.dcf(desc, fields = fields), error = function(e) NULL)
+    if (is.null(dcf)) {
+      next
+    }
+    vals <- dcf[1, , drop = TRUE]
+    vals <- vals[!is.na(vals)]
+    if (length(vals) == 0) {
+      next
+    }
+    parts <- trimws(unlist(strsplit(paste(vals, collapse = ","), ",")))
+    parts <- trimws(sub("\\(.*\\)$", "", parts))
+    parts <- parts[nzchar(parts) & parts != "R"]
+    deps <- c(deps, parts)
+  }
+  setdiff(unique(deps), BASE_R_PACKAGES)
+}
+
+#' Install local R package sources into the bundled library
+#'
+#' Installs source directories or archives with the bundled R (matching the
+#' runtime version), after the repository install step, so a local build
+#' overrides a same-named package from the repositories. The bundled library is
+#' placed on `.libPaths()` and exported as `R_LIBS` / `R_LIBS_USER` /
+#' `R_LIBS_SITE` so the `R CMD INSTALL` child spawned by `install.packages()`
+#' resolves the package's imports. The call fails loudly when a local package
+#' does not end up installed.
+#'
+#' The bundled R's lazy-load subprocess can crash at process exit (a Windows
+#' DLL-unload fault in the dependency stack, e.g. rlang) after it has already
+#' written the lazy-load database, which makes `R CMD INSTALL` report a spurious
+#' "lazy loading failed" and a non-zero exit. We therefore install with
+#' `--no-staged-install --no-clean-on-error` (so every file lands directly in
+#' the final library and the complete package is kept), and verify success by
+#' checking that the installed package's metadata and lazy-load database exist
+#' instead of trusting the exit status.
+#'
+#' @param bundled_rscript Character. Path to the bundled `Rscript`.
+#' @param local_packages Character vector. Local package paths (directories or archives).
+#' @param lib_path Character. Destination library (the bundled library).
+#' @param verbose Logical. Whether to display progress.
+#' @return Invisibly, the normalised package paths.
+#' @keywords internal
+install_local_r_packages <- function(bundled_rscript, local_packages, lib_path,
+                                     verbose = TRUE) {
+  if (length(local_packages) == 0) {
+    return(invisible(character(0)))
+  }
+  paths <- normalizePath(unlist(local_packages), winslash = "/", mustWork = TRUE)
+  lib <- gsub("\\\\", "/", lib_path)
+  names <- local_r_package_names(paths)
+  pkg_str <- paste0("'", paths, "'", collapse = ", ")
+  names_str <- paste0("'", names, "'", collapse = ", ")
+  r_code <- sprintf(
+    paste0(
+      ".libPaths(c('%s', .libPaths())); ",
+      "Sys.setenv(R_LIBS = '%s', R_LIBS_USER = '%s', R_LIBS_SITE = '%s'); ",
+      "install.packages(c(%s), lib = '%s', repos = NULL, type = 'source', ",
+      "dependencies = FALSE, INSTALL_opts = c('--no-staged-install', '--no-clean-on-error')); ",
+      "missing <- setdiff(c(%s), rownames(installed.packages(lib.loc = '%s'))); ",
+      "if (length(missing)) stop('local package install failed: ', paste(missing, collapse = ', '))"
+    ),
+    lib, lib, lib, lib, pkg_str, lib, names_str, lib
+  )
+  if (verbose) cli::cli_alert_info("Installing local R package(s) from source...")
+  result <- processx::run(
+    bundled_rscript, c("--vanilla", "-e", r_code),
+    env = c(R_LIBS = lib, R_LIBS_USER = lib, R_LIBS_SITE = lib),
+    error_on_status = FALSE, echo = verbose, timeout = 600
+  )
+  present <- vapply(names, function(nm) {
+    fs::file_exists(fs::path(lib, nm, "Meta", "package.rds")) &&
+      fs::file_exists(fs::path(lib, nm, "NAMESPACE")) &&
+      fs::file_exists(fs::path(lib, nm, "R", paste0(nm, ".rdb")))
+  }, logical(1))
+  missing <- names[!present]
+  if (length(missing) > 0) {
+    err_full <- trimws(result$stderr %||% "")
+    out_tail <- trimws(result$stdout %||% "")
+    if (nchar(out_tail) > 3000) out_tail <- substr(out_tail, nchar(out_tail) - 2999, nchar(out_tail))
+    logf <- tempfile("shinyelectron-local-install-", fileext = ".log")
+    writeLines(c("== stdout ==", result$stdout, "", "== stderr ==", result$stderr), logf)
+    diag_txt <- local_install_diagnostic(bundled_rscript, paths, lib, names)
+    cli::cli_abort(c(
+      "Failed to install local R package(s) into the bundled library",
+      "x" = "Missing after install: {paste(missing, collapse = ', ')}",
+      "x" = "Paths: {.path {paths}}",
+      "i" = "log: {.path {logf}}",
+      "x" = "stderr: {err_full}",
+      "i" = "stdout tail: {out_tail}",
+      "i" = "lazy-load diagnostic: {diag_txt}"
+    ))
+  }
+  if (verbose) cli::cli_alert_info(
+    "Installed local R package(s) from source (a benign R CMD INSTALL exit code is expected and ignored)"
+  )
+  invisible(paths)
+}
+local_install_diagnostic <- function(bundled_rscript, paths, lib, names) {
+  pkgname <- names[[1]]
+  diag_code <- sprintf(
+    paste0(
+      ".libPaths(c('%s', .libPaths())); ",
+      "Sys.setenv(R_LIBS = '%s', R_LIBS_USER = '%s', R_LIBS_SITE = '%s'); ",
+      "td <- tempfile('seldiag'); dir.create(td); ",
+      "utils::untar('%s', exdir = td); ",
+      "setwd(file.path(td, '%s')); ",
+      "cat('LIBS:', paste(.libPaths(), collapse = ' | ')); ",
+      "res1 <- tryCatch({ suppressPackageStartupMessages(.getRequiredPackages(quietly = TRUE)); 'OK' }, error = function(e) paste('ERR', conditionMessage(e))); ",
+      "cat(' GETREQ:', res1); ",
+      "cat(' LIBPKGS:', paste(intersect(list.dirs('%s', recursive = FALSE, full.names = FALSE), c('Seurat','SeuratObject','ggplot2','dplyr','shiny','rlang','DT','qs2','shinyjqui')), collapse = ',')); ",
+      "cat(' NSLOADED:', paste(intersect(loadedNamespaces(), c('Seurat','SeuratObject','ggplot2','dplyr','shiny','rlang')), collapse = ',')); ",
+      "cat(' DONE')"
+    ),
+    lib, lib, lib, lib, paths[[1]], pkgname, lib
+  )
+  diag <- processx::run(
+    bundled_rscript, c("--vanilla", "-e", diag_code),
+    env = c(R_LIBS = lib, R_LIBS_USER = lib, R_LIBS_SITE = lib),
+    error_on_status = FALSE, timeout = 600
+  )
+  paste0("[status ", diag$status, "] [stdout] ", trimws(diag$stdout %||% ""),
+         " [stderr] ", trimws(diag$stderr %||% ""))
+}
