@@ -180,7 +180,8 @@ build_electron_app <- function(app_dir, output_dir, app_name = NULL, app_type = 
         arch = arch[1],
         verbose = verbose,
         prune_r_library = prune_r_library,
-        prune_r_runtime = prune_r_runtime
+        prune_r_runtime = prune_r_runtime,
+        local_packages = unlist(config$dependencies$r$local_packages) %||% character(0)
       )
     }
 

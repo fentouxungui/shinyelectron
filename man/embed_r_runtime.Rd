@@ -13,7 +13,8 @@ embed_r_runtime(
   arch,
   verbose = TRUE,
   prune_r_library = TRUE,
-  prune_r_runtime = TRUE
+  prune_r_runtime = TRUE,
+  local_packages = character(0)
 )
 }
 \arguments{
@@ -34,6 +35,8 @@ embed_r_runtime(
 \item{prune_r_library}{Logical. Prune build-only files (include/, tests/, examples/) from the bundled package library.}
 
 \item{prune_r_runtime}{Logical. Prune doc/, tests/ and include/ from the portable R distribution.}
+
+\item{local_packages}{Character vector. Paths to local R package source directories or tarballs to install into the bundled library after the repository packages (a local build overrides a same-named CRAN version).}
 }
 \value{
 Invisibly, the path to the embedded \code{runtime/R} directory.
