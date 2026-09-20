@@ -27,8 +27,16 @@ function logDebug(...args) {
 function waitForServer(port, { timeout = 30000, interval = 500 } = {}) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
+    const fail = () =>
+      reject(new Error(`Server on port ${port} did not start within ${timeout}ms`));
 
     function check() {
+      const remaining = timeout - (Date.now() - start);
+      if (remaining <= 0) {
+        fail();
+        return;
+      }
+
       const req = http.get(`http://localhost:${port}`, (res) => {
         res.resume();
         resolve();
@@ -36,16 +44,20 @@ function waitForServer(port, { timeout = 30000, interval = 500 } = {}) {
 
       req.on('error', () => {
         if (Date.now() - start > timeout) {
-          reject(new Error(`Server on port ${port} did not start within ${timeout}ms`));
+          fail();
         } else {
           setTimeout(check, interval);
         }
       });
 
-      req.setTimeout(8000, () => {
+      // Cap this attempt by the remaining overall budget rather than a small
+      // fixed value. A slow-but-healthy first render (which can take many
+      // seconds) must be allowed to finish; the total deadline still bounds
+      // the wait, so this cannot hang forever.
+      req.setTimeout(Math.max(1000, remaining), () => {
         req.destroy();
         if (Date.now() - start > timeout) {
-          reject(new Error(`Server on port ${port} did not start within ${timeout}ms`));
+          fail();
         } else {
           setTimeout(check, interval);
         }

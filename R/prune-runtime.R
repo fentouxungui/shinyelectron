@@ -71,6 +71,9 @@ prune_r_paths <- function(dir, dir_names = character(0),
 prune_bundled_r_runtime <- function(runtime_dir, prune_library = TRUE,
                                     prune_portable = TRUE, verbose = TRUE) {
   runtime_dir <- fs::path(runtime_dir)
+  if (!fs::dir_exists(runtime_dir)) {
+    return(invisible(list(files = 0L, bytes = 0)))
+  }
   total_files <- 0L
   total_bytes <- 0
 

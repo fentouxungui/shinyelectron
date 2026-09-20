@@ -208,8 +208,6 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
 #' @param platform Character scalar. Target platform.
 #' @param arch Character scalar. Target architecture.
 #' @param verbose Logical. Whether to display progress.
-#' @param prune_r_library Logical. Prune build-only files (include/, tests/, examples/) from the bundled package library.
-#' @param prune_r_runtime Logical. Prune doc/, tests/ and include/ from the portable R distribution.
 #' @return Invisibly, the path to the embedded `runtime/Python` directory.
 #' @keywords internal
 embed_python_runtime <- function(output_dir, packages, index_urls, version,
@@ -263,3 +261,4 @@ embed_python_runtime <- function(output_dir, packages, index_urls, version,
   if (verbose) cli::cli_alert_success("Embedded Python runtime")
   invisible(runtime_dest)
 }
+

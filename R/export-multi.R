@@ -218,7 +218,9 @@ export_multi_app <- function(appdir, destdir, config,
         r_packages = sort(unique(r_union_packages)),
         r_repos = r_union_repos,
         py_packages = sort(unique(py_union_packages)),
-        py_index_urls = py_union_index_urls
+        py_index_urls = py_union_index_urls,
+        prune_r_library = prune_r_library,
+        prune_r_runtime = prune_r_runtime
       )
 
       result$electron_app <- built_app_dir
@@ -277,13 +279,19 @@ build_multi_app <- function(apps_dir, output_dir, app_name,
                              icon, config, overwrite, verbose,
                              r_packages = NULL, r_repos = NULL,
                              py_packages = NULL, py_index_urls = NULL,
-                             shinylive_site_dir = NULL) {
+                             shinylive_site_dir = NULL,
+                             prune_r_library = NULL, prune_r_runtime = NULL) {
 
   if (is.null(platform)) platform <- detect_current_platform()
   if (is.null(arch)) arch <- detect_current_arch()
 
   validate_platform(platform)
   validate_arch(arch)
+
+  # Resolve pruning (argument > config optimize: > default TRUE) so the
+  # function is safe to call directly as well as from export_multi_app().
+  prune_r_library <- prune_r_library %||% config$optimize$r_library %||% TRUE
+  prune_r_runtime <- prune_r_runtime %||% config$optimize$r_runtime %||% TRUE
 
   # Resolve each app's type and runtime strategy once; the single-platform
   # guard, runtime embedding, and auto-download manifest writing all key off the

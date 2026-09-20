@@ -460,18 +460,19 @@ class NativePyBackend extends EventEmitter {
         spawnEnv.PYTHONPATH = pythonPaths.join(path.delimiter) + (existing ? path.delimiter + existing : '');
       }
 
-      this.pyProcess = spawn(python, args, {
+      const child = spawn(python, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: spawnEnv
       });
+      this.pyProcess = child;
 
       let stderr = '';
 
-      this.pyProcess.stdout.on('data', (data) => {
+      child.stdout.on('data', (data) => {
         logDebug(`[Python stdout] ${data.toString().trim()}`);
       });
 
-      this.pyProcess.stderr.on('data', (data) => {
+      child.stderr.on('data', (data) => {
         const msg = data.toString().trim();
         stderr += msg + '\n';
         logDebug(`[Python stderr] ${msg}`);
@@ -486,14 +487,18 @@ class NativePyBackend extends EventEmitter {
         }
       });
 
-      this.pyProcess.on('error', (err) => {
+      child.on('error', (err) => {
+        if (this.pyProcess !== child) return;
         this.pyProcess = null;
         const error = new Error(`Failed to start Python: ${err.message}\n\nIs Python installed and on your PATH?`);
         this.emit('status', { phase: 'error', message: error.message, detail: { stderr } });
         settle(reject, error);
       });
 
-      this.pyProcess.on('close', (code) => {
+      child.on('close', (code) => {
+        // Ignore events from a previous child generation (retry or multi-app
+        // switch): a stale close must not clear the new handle or report a crash.
+        if (this.pyProcess !== child) return;
         this.pyProcess = null;
         // Intentional shutdown (stop()/quit) kills the child, which exits
         // non-zero; do not report that as a crash.
