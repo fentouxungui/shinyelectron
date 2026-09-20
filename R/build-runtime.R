@@ -304,7 +304,8 @@ embed_python_runtime <- function(output_dir, packages, index_urls, version,
 #' Resolve the package names of local R package paths
 #'
 #' Accepts a mix of source directories (with a `DESCRIPTION`) and
-#' `<pkg>_<version>.<ext>` archives, returning the `Package` name for each.
+#' `<pkg>_<version>.<ext>` or `<pkg>-<version>.<ext>` archives, returning the
+#' `Package` name for each (read from the archive's `DESCRIPTION`).
 #'
 #' @param paths Character vector. Paths to local package directories or archives.
 #' @return Character vector of package names (empty when `paths` is empty).
@@ -317,12 +318,12 @@ local_r_package_names <- function(paths) {
   vapply(
     paths,
     function(p) {
-      desc <- fs::path(p, "DESCRIPTION")
-      if (fs::dir_exists(p) && fs::file_exists(desc)) {
-        read.dcf(desc, fields = "Package")[[1]]
-      } else {
-        sub("_[0-9][^_]*$", "", fs::path_file(p))
+      dcf <- local_read_description(p)
+      if (!is.null(dcf) && "Package" %in% colnames(dcf)) {
+        return(dcf[1, "Package"][[1]])
       }
+      base <- sub("\\.(tar\\.gz|tgz|zip|tar)$", "", fs::path_file(p), ignore.case = TRUE)
+      sub("[-_][0-9][^-_]*$", "", base)
     },
     character(1),
     USE.NAMES = FALSE
@@ -332,9 +333,9 @@ local_r_package_names <- function(paths) {
 #' Resolve the declared dependencies of local R package paths
 #'
 #' Reads `Depends`, `Imports` and `LinkingTo` from each local package's
-#' `DESCRIPTION` so the repository install step can install them before the
-#' local package is installed from source. Version constraints and `R` are
-#' stripped, and base/recommended packages are dropped.
+#' `DESCRIPTION` (directories and archives alike) so the repository install step
+#' can install them before the local package is installed from source. Version
+#' constraints and `R` are stripped, and base/recommended packages are dropped.
 #'
 #' @param paths Character vector. Paths to local package directories or archives.
 #' @return Character vector of dependency package names.
@@ -347,27 +348,52 @@ local_r_package_deps <- function(paths) {
   fields <- c("Depends", "Imports", "LinkingTo")
   deps <- character(0)
   for (p in paths) {
-    desc <- fs::path(p, "DESCRIPTION")
-    if (!fs::file_exists(desc)) {
-      next
-    }
-    dcf <- tryCatch(read.dcf(desc, fields = fields), error = function(e) NULL)
+    dcf <- local_read_description(p)
     if (is.null(dcf)) {
       next
     }
-    vals <- dcf[1, , drop = TRUE]
-    vals <- vals[!is.na(vals)]
-    if (length(vals) == 0) {
-      next
+    for (f in intersect(fields, colnames(dcf))) {
+      vals <- dcf[1, f]
+      if (is.na(vals) || !nzchar(trimws(vals))) {
+        next
+      }
+      parts <- trimws(unlist(strsplit(vals, ",")))
+      parts <- trimws(sub("\\(.*\\)$", "", parts))
+      parts <- parts[nzchar(parts) & parts != "R"]
+      deps <- c(deps, parts)
     }
-    parts <- trimws(unlist(strsplit(paste(vals, collapse = ","), ",")))
-    parts <- trimws(sub("\\(.*\\)$", "", parts))
-    parts <- parts[nzchar(parts) & parts != "R"]
-    deps <- c(deps, parts)
   }
   setdiff(unique(deps), BASE_R_PACKAGES)
 }
 
+# Read the DESCRIPTION of a local package path, which may be a source directory
+# or a source archive (.tar.gz / .tgz / .tar). Archive top-level directory names
+# vary (`<pkg>/` from R CMD build vs `<pkg>-<version>/` from GitHub tarballs), so
+# the `Package` / dependency fields are read from the DESCRIPTION inside the
+# archive rather than inferred from the file name.
+local_read_description <- function(path) {
+  path <- unlist(path)[[1]]
+  desc <- fs::path(path, "DESCRIPTION")
+  if (fs::dir_exists(path) && fs::file_exists(desc)) {
+    return(read.dcf(desc))
+  }
+  if (fs::file_exists(path)) {
+    tmp <- tempfile("pkgdesc")
+    dir.create(tmp, showWarnings = FALSE)
+    on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+    ok <- tryCatch({
+      utils::untar(path, exdir = tmp)
+      TRUE
+    }, error = function(e) FALSE)
+    if (isTRUE(ok)) {
+      descs <- list.files(tmp, pattern = "^DESCRIPTION$", recursive = TRUE, full.names = TRUE)
+      if (length(descs)) {
+        return(tryCatch(read.dcf(descs[[1]]), error = function(e) NULL))
+      }
+    }
+  }
+  NULL
+}
 #' Install local R package sources into the bundled library
 #'
 #' Installs source directories or archives with the bundled R (matching the

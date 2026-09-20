@@ -14,8 +14,8 @@ Character vector of dependency package names.
 }
 \description{
 Reads \code{Depends}, \code{Imports} and \code{LinkingTo} from each local package's
-\code{DESCRIPTION} so the repository install step can install them before the
-local package is installed from source. Version constraints and \code{R} are
-stripped, and base/recommended packages are dropped.
+\code{DESCRIPTION} (directories and archives alike) so the repository install step
+can install them before the local package is installed from source. Version
+constraints and \code{R} are stripped, and base/recommended packages are dropped.
 }
 \keyword{internal}

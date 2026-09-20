@@ -14,6 +14,7 @@ Character vector of package names (empty when \code{paths} is empty).
 }
 \description{
 Accepts a mix of source directories (with a \code{DESCRIPTION}) and
-\verb{<pkg>_<version>.<ext>} archives, returning the \code{Package} name for each.
+\verb{<pkg>_<version>.<ext>} or \verb{<pkg>-<version>.<ext>} archives, returning the
+\code{Package} name for each (read from the archive's \code{DESCRIPTION}).
 }
 \keyword{internal}
