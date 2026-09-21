@@ -393,6 +393,8 @@ function setupAutoUpdater() {
 
   autoUpdater.autoDownload = {{#auto_download}}true{{/auto_download}}{{^auto_download}}false{{/auto_download}};
   autoUpdater.autoInstallOnAppQuit = {{#auto_install}}true{{/auto_install}}{{^auto_install}}false{{/auto_install}};
+  // NSIS updater: ship the full installer, not a web installer.
+  autoUpdater.disableWebInstaller = true;
 
   autoUpdater.on('checking-for-update', () => {
     updaterLog.info('Checking for updates...');
