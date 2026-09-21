@@ -252,7 +252,6 @@ function createMenu() {
               {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
               {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
               {{#has_app_email}}'Email: {{{app_email}}}',{{/has_app_email}}
-              {{#has_app_homepage}}'Homepage: {{{app_homepage}}}',{{/has_app_homepage}}
               {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
               '', 'Built with shinyelectron'
             ].join('\n');
@@ -260,7 +259,7 @@ function createMenu() {
             const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About {{{app_name}}}',
-              message: '{{{app_name}}} {{{app_version}}}',
+              message: '{{{app_name}}}',
               detail: aboutDetail,
               buttons: aboutButtons,
               defaultId: 0,
@@ -389,7 +388,6 @@ function createMenu() {
               {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
               {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
               {{#has_app_email}}'Email: {{{app_email}}}',{{/has_app_email}}
-              {{#has_app_homepage}}'Homepage: {{{app_homepage}}}',{{/has_app_homepage}}
               {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
               '', 'Built with shinyelectron'
             ].join('\n');
@@ -397,7 +395,7 @@ function createMenu() {
             const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About {{{app_name}}}',
-              message: '{{{app_name}}} {{{app_version}}}',
+              message: '{{{app_name}}}',
               detail: aboutDetail,
               buttons: aboutButtons,
               defaultId: 0,
