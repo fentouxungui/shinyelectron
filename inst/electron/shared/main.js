@@ -226,7 +226,7 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
-        {{#help_url}}
+        {{#has_help_url}}
         {
           label: 'Documentation',
           click: async () => {
@@ -234,7 +234,7 @@ function createMenu() {
             await shell.openExternal('{{help_url}}');
           }
         },
-        {{/help_url}}
+        {{/has_help_url}}
         {
           label: 'View Logs',
           click: () => {
@@ -347,7 +347,7 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
-        {{#help_url}}
+        {{#has_help_url}}
         {
           label: 'Documentation',
           click: async () => {
@@ -355,7 +355,7 @@ function createMenu() {
             await shell.openExternal('{{help_url}}');
           }
         },
-        {{/help_url}}
+        {{/has_help_url}}
         {
           label: 'View Logs',
           click: () => {

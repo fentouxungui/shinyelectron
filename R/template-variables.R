@@ -92,6 +92,7 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     menu_minimal = identical(config$menu$template %||% "default", "minimal"),
     show_dev_tools = config$menu$show_dev_tools %||% SHINYELECTRON_DEFAULTS$menu$show_dev_tools,
     help_url = config$menu$help_url %||% "",
+    has_help_url = !is.null(config$menu$help_url),
 
     # Auto-updates
     updates_enabled = config$updates$enabled %||% SHINYELECTRON_DEFAULTS$updates$enabled,
