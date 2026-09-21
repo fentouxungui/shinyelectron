@@ -245,14 +245,30 @@ function createMenu() {
         { type: 'separator' },
         {
           label: 'About',
-          click: () => {
-            const { dialog } = require('electron');
-            dialog.showMessageBox(mainWindow, {
+          click: async () => {
+            const { dialog, shell } = require('electron');
+            const aboutDetail = [
+              'Version {{{app_version}}}',
+              {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
+              {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
+              {{#has_app_email}}'Email: {{{app_email}}}',{{/has_app_email}}
+              {{#has_app_homepage}}'Homepage: {{{app_homepage}}}',{{/has_app_homepage}}
+              {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
+              '', 'Built with shinyelectron'
+            ].join('\n');
+            const aboutButtons = ['OK'{{#has_app_homepage}}, 'Open Homepage'{{/has_app_homepage}}];
+            const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About {{app_name}}',
-              message: '{{app_name}}',
-              detail: 'Version {{app_version}}\n\nBuilt with shinyelectron'
+              title: 'About {{{app_name}}}',
+              message: '{{{app_name}}} {{{app_version}}}',
+              detail: aboutDetail,
+              buttons: aboutButtons,
+              defaultId: 0,
+              cancelId: 0
             });
+            {{#has_app_homepage}}
+            if (aboutResult.response === 1) await shell.openExternal('{{{app_homepage}}}');
+            {{/has_app_homepage}}
           }
         }
       ]
@@ -366,14 +382,30 @@ function createMenu() {
         { type: 'separator' },
         {
           label: 'About',
-          click: () => {
-            const { dialog } = require('electron');
-            dialog.showMessageBox(mainWindow, {
+          click: async () => {
+            const { dialog, shell } = require('electron');
+            const aboutDetail = [
+              'Version {{{app_version}}}',
+              {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
+              {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
+              {{#has_app_email}}'Email: {{{app_email}}}',{{/has_app_email}}
+              {{#has_app_homepage}}'Homepage: {{{app_homepage}}}',{{/has_app_homepage}}
+              {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
+              '', 'Built with shinyelectron'
+            ].join('\n');
+            const aboutButtons = ['OK'{{#has_app_homepage}}, 'Open Homepage'{{/has_app_homepage}}];
+            const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About {{app_name}}',
-              message: '{{app_name}}',
-              detail: 'Version {{app_version}}\n\nBuilt with shinyelectron'
+              title: 'About {{{app_name}}}',
+              message: '{{{app_name}}} {{{app_version}}}',
+              detail: aboutDetail,
+              buttons: aboutButtons,
+              defaultId: 0,
+              cancelId: 0
             });
+            {{#has_app_homepage}}
+            if (aboutResult.response === 1) await shell.openExternal('{{{app_homepage}}}');
+            {{/has_app_homepage}}
           }
         }
       ]

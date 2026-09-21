@@ -18,6 +18,9 @@ default_config <- function() {
       product_name = NULL,
       description = NULL,
       author = NULL,
+      email = NULL,
+      homepage = NULL,
+      copyright = NULL,
       log_dir = SHINYELECTRON_DEFAULTS$logging$log_dir,
       log_level = SHINYELECTRON_DEFAULTS$logging$log_level
     ),
