@@ -51,11 +51,41 @@ generate_template_variables <- function(app_name, app_slug, app_type,
   # container_image becoming {} instead of being absent).
   backend_config <- Filter(Negate(is.null), backend_config)
 
+  # About dialog: allow "Name <email>" in the author field and split out the email.
+  about_author <- config$app$author
+  about_email <- config$app$email
+  if (is.null(about_email) && !is.null(about_author) &&
+      grepl("<[^>]+>", about_author)) {
+    about_email <- sub(".*<([^>]+)>.*", "\\1", about_author)
+    about_author <- trimws(sub("<[^>]+>", "", about_author))
+  }
+
+  # Escape a value for a single-quoted JavaScript string literal in main.js.
+  js_str <- function(x) {
+    if (is.null(x)) return(NULL)
+    x <- gsub("'", "\\'", x, fixed = TRUE)
+    x <- gsub("\r", " ", x, fixed = TRUE)
+    x <- gsub("\n", " ", x, fixed = TRUE)
+    x
+  }
+
   list(
     app_name = app_name,
     app_slug = app_slug,
     app_type = app_type,
     app_version = config$app$version %||% SHINYELECTRON_DEFAULTS$app_version,
+
+    # About dialog metadata
+    app_description = js_str(config$app$description) %||% "",
+    has_app_description = !is.null(config$app$description),
+    app_author = js_str(about_author) %||% "",
+    has_app_author = !is.null(about_author),
+    app_email = js_str(about_email) %||% "",
+    has_app_email = !is.null(about_email),
+    app_homepage = js_str(config$app$homepage) %||% "",
+    has_app_homepage = !is.null(config$app$homepage),
+    app_copyright = js_str(config$app$copyright) %||% "",
+    has_app_copyright = !is.null(config$app$copyright),
     has_icon = !is.null(icon),
     # copy_brand_assets() preserves the icon's extension (icon.ico/.icns/.png);
     # carry the real filename so the BrowserWindow icon path is not broken.
@@ -92,6 +122,7 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     menu_minimal = identical(config$menu$template %||% "default", "minimal"),
     show_dev_tools = config$menu$show_dev_tools %||% SHINYELECTRON_DEFAULTS$menu$show_dev_tools,
     help_url = config$menu$help_url %||% "",
+    has_help_url = !is.null(config$menu$help_url),
 
     # Auto-updates
     updates_enabled = config$updates$enabled %||% SHINYELECTRON_DEFAULTS$updates$enabled,

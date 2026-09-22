@@ -226,7 +226,7 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
-        {{#help_url}}
+        {{#has_help_url}}
         {
           label: 'Documentation',
           click: async () => {
@@ -234,7 +234,7 @@ function createMenu() {
             await shell.openExternal('{{help_url}}');
           }
         },
-        {{/help_url}}
+        {{/has_help_url}}
         {
           label: 'View Logs',
           click: () => {
@@ -245,14 +245,33 @@ function createMenu() {
         { type: 'separator' },
         {
           label: 'About',
-          click: () => {
-            const { dialog } = require('electron');
-            dialog.showMessageBox(mainWindow, {
+          click: async () => {
+            const { dialog, shell } = require('electron');
+            const aboutDetail = [
+              'Version {{{app_version}}}',
+              {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
+              {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
+              {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
+              '', 'Built with shinyelectron'
+            ].join('\n');
+            const aboutButtons = ['OK'];
+            const aboutActions = [];
+            {{#updates_enabled}}aboutActions[aboutButtons.push('Check for Updates') - 1] = 'update';{{/updates_enabled}}
+            {{#has_app_homepage}}aboutActions[aboutButtons.push('Visit Website') - 1] = 'homepage';{{/has_app_homepage}}
+            {{#has_app_email}}aboutActions[aboutButtons.push('Email') - 1] = 'email';{{/has_app_email}}
+            const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About {{app_name}}',
-              message: '{{app_name}}',
-              detail: 'Version {{app_version}}\n\nBuilt with shinyelectron'
+              title: 'About {{{app_name}}}',
+              message: '{{{app_name}}}',
+              detail: aboutDetail,
+              buttons: aboutButtons,
+              defaultId: 0,
+              cancelId: 0
             });
+            const aboutAction = aboutActions[aboutResult.response];
+            {{#updates_enabled}}if (aboutAction === 'update') checkForUpdatesInteractive();{{/updates_enabled}}
+            {{#has_app_homepage}}if (aboutAction === 'homepage') await shell.openExternal('{{{app_homepage}}}');{{/has_app_homepage}}
+            {{#has_app_email}}if (aboutAction === 'email') await shell.openExternal('mailto:{{{app_email}}}');{{/has_app_email}}
           }
         }
       ]
@@ -347,7 +366,7 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
-        {{#help_url}}
+        {{#has_help_url}}
         {
           label: 'Documentation',
           click: async () => {
@@ -355,7 +374,7 @@ function createMenu() {
             await shell.openExternal('{{help_url}}');
           }
         },
-        {{/help_url}}
+        {{/has_help_url}}
         {
           label: 'View Logs',
           click: () => {
@@ -366,14 +385,33 @@ function createMenu() {
         { type: 'separator' },
         {
           label: 'About',
-          click: () => {
-            const { dialog } = require('electron');
-            dialog.showMessageBox(mainWindow, {
+          click: async () => {
+            const { dialog, shell } = require('electron');
+            const aboutDetail = [
+              'Version {{{app_version}}}',
+              {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
+              {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
+              {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
+              '', 'Built with shinyelectron'
+            ].join('\n');
+            const aboutButtons = ['OK'];
+            const aboutActions = [];
+            {{#updates_enabled}}aboutActions[aboutButtons.push('Check for Updates') - 1] = 'update';{{/updates_enabled}}
+            {{#has_app_homepage}}aboutActions[aboutButtons.push('Visit Website') - 1] = 'homepage';{{/has_app_homepage}}
+            {{#has_app_email}}aboutActions[aboutButtons.push('Email') - 1] = 'email';{{/has_app_email}}
+            const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About {{app_name}}',
-              message: '{{app_name}}',
-              detail: 'Version {{app_version}}\n\nBuilt with shinyelectron'
+              title: 'About {{{app_name}}}',
+              message: '{{{app_name}}}',
+              detail: aboutDetail,
+              buttons: aboutButtons,
+              defaultId: 0,
+              cancelId: 0
             });
+            const aboutAction = aboutActions[aboutResult.response];
+            {{#updates_enabled}}if (aboutAction === 'update') checkForUpdatesInteractive();{{/updates_enabled}}
+            {{#has_app_homepage}}if (aboutAction === 'homepage') await shell.openExternal('{{{app_homepage}}}');{{/has_app_homepage}}
+            {{#has_app_email}}if (aboutAction === 'email') await shell.openExternal('mailto:{{{app_email}}}');{{/has_app_email}}
           }
         }
       ]
@@ -393,6 +431,8 @@ function setupAutoUpdater() {
 
   autoUpdater.autoDownload = {{#auto_download}}true{{/auto_download}}{{^auto_download}}false{{/auto_download}};
   autoUpdater.autoInstallOnAppQuit = {{#auto_install}}true{{/auto_install}}{{^auto_install}}false{{/auto_install}};
+  // NSIS updater: ship the full installer, not a web installer.
+  autoUpdater.disableWebInstaller = true;
 
   autoUpdater.on('checking-for-update', () => {
     updaterLog.info('Checking for updates...');
@@ -437,7 +477,33 @@ function setupAutoUpdater() {
       defaultId: 0
     }).then((result) => {
       if (result.response === 0) {
-        autoUpdater.quitAndInstall();
+        // Quit cleanly before handing over to the silent installer: stop the
+        // backend (R/Shiny) and wait for it to exit so it releases the bundled
+        // runtime's files, and suppress the window-close confirmation so the
+        // update cannot be cancelled halfway.
+        isShuttingDown = true;
+        app.isQuitting = true;
+
+        let handedOver = false;
+        const handOver = () => {
+          if (handedOver) return;
+          handedOver = true;
+          autoUpdater.quitAndInstall();
+        };
+
+        if (currentBackend) {
+          const onExit = (d) => {
+            if (d && d.phase === 'app_exit') {
+              currentBackend.removeListener('status', onExit);
+              setTimeout(handOver, 700);
+            }
+          };
+          currentBackend.on('status', onExit);
+          currentBackend.stop();
+        }
+        stopSharedShinyliveServer();
+        // Hard fallback if the backend never reports app_exit.
+        setTimeout(handOver, {{shutdown_timeout}});
       }
     });
   });
@@ -445,6 +511,44 @@ function setupAutoUpdater() {
   autoUpdater.on('error', (err) => {
     updaterLog.error('AutoUpdater error:', err);
   });
+}
+
+// Interactive "Check for Updates" (used by the About dialog): reports the
+// outcome instead of silently doing nothing when already up to date.
+async function checkForUpdatesInteractive() {
+  const { dialog } = require('electron');
+  const detached = () => {
+    autoUpdater.removeListener('update-not-available', onNone);
+    autoUpdater.removeListener('update-available', onAvailable);
+    autoUpdater.removeListener('error', onError);
+  };
+  const onNone = () => {
+    detached();
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Check for Updates',
+      message: 'You are up to date',
+      detail: `Version ${app.getVersion()} is the latest version.`
+    });
+  };
+  const onAvailable = () => {
+    // An update was found; setupAutoUpdater() downloads it and prompts to
+    // restart once it is ready.
+    detached();
+  };
+  const onError = (err) => {
+    detached();
+    dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Check for Updates',
+      message: 'Could not check for updates',
+      detail: String((err && err.message) || err)
+    });
+  };
+  autoUpdater.on('update-not-available', onNone);
+  autoUpdater.on('update-available', onAvailable);
+  autoUpdater.on('error', onError);
+  autoUpdater.checkForUpdatesAndNotify();
 }
 {{/updates_enabled}}
 

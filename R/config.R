@@ -18,6 +18,9 @@ default_config <- function() {
       product_name = NULL,
       description = NULL,
       author = NULL,
+      email = NULL,
+      homepage = NULL,
+      copyright = NULL,
       log_dir = SHINYELECTRON_DEFAULTS$logging$log_dir,
       log_level = SHINYELECTRON_DEFAULTS$logging$log_level
     ),
@@ -509,6 +512,7 @@ nodejs:
 #     repos:
 #       - "https://cloud.r-project.org"
 #     lib_path: null         # null = R default, "app-local", or custom path
+#     local_packages: []     # Local source dirs/tarballs installed into the bundle (override same-named CRAN versions)
 #   python:
 #     # null = the maintained latest pin; "latest" = always newest; "3.12.0" = exact pin
 #     version: null

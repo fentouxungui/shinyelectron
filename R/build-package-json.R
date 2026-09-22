@@ -70,6 +70,10 @@ generate_package_json <- function(app_slug, app_version, backend, config,
   build_config <- list(
     appId = config$installer$app_id %||% paste0("com.shinyelectron.", app_slug),
     productName = config$app$product_name %||% app_name %||% app_slug,
+    # Space-free artifact name: GitHub Releases rewrites spaces in asset names,
+    # and electron-updater's GitHub provider builds the download URL from
+    # latest.yml's path, so a name with spaces 404s the auto-update download.
+    artifactName = "${productName}-Setup-${version}.${ext}",
     directories = list(output = "dist")
   )
 
