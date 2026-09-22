@@ -60,6 +60,15 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     about_author <- trimws(sub("<[^>]+>", "", about_author))
   }
 
+  # Escape a value for a single-quoted JavaScript string literal in main.js.
+  js_str <- function(x) {
+    if (is.null(x)) return(NULL)
+    x <- gsub("'", "\\'", x, fixed = TRUE)
+    x <- gsub("\r", " ", x, fixed = TRUE)
+    x <- gsub("\n", " ", x, fixed = TRUE)
+    x
+  }
+
   list(
     app_name = app_name,
     app_slug = app_slug,
@@ -67,15 +76,15 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     app_version = config$app$version %||% SHINYELECTRON_DEFAULTS$app_version,
 
     # About dialog metadata
-    app_description = config$app$description %||% "",
+    app_description = js_str(config$app$description) %||% "",
     has_app_description = !is.null(config$app$description),
-    app_author = about_author %||% "",
+    app_author = js_str(about_author) %||% "",
     has_app_author = !is.null(about_author),
-    app_email = about_email %||% "",
+    app_email = js_str(about_email) %||% "",
     has_app_email = !is.null(about_email),
-    app_homepage = config$app$homepage %||% "",
+    app_homepage = js_str(config$app$homepage) %||% "",
     has_app_homepage = !is.null(config$app$homepage),
-    app_copyright = config$app$copyright %||% "",
+    app_copyright = js_str(config$app$copyright) %||% "",
     has_app_copyright = !is.null(config$app$copyright),
     has_icon = !is.null(icon),
     # copy_brand_assets() preserves the icon's extension (icon.ico/.icns/.png);

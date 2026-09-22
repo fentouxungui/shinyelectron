@@ -251,11 +251,14 @@ function createMenu() {
               'Version {{{app_version}}}',
               {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
               {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
-              {{#has_app_email}}'Email: {{{app_email}}}',{{/has_app_email}}
               {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
               '', 'Built with shinyelectron'
             ].join('\n');
-            const aboutButtons = ['OK'{{#has_app_homepage}}, 'Open Homepage'{{/has_app_homepage}}];
+            const aboutButtons = ['OK'];
+            const aboutActions = [];
+            {{#updates_enabled}}aboutActions[aboutButtons.push('Check for Updates') - 1] = 'update';{{/updates_enabled}}
+            {{#has_app_homepage}}aboutActions[aboutButtons.push('Visit Website') - 1] = 'homepage';{{/has_app_homepage}}
+            {{#has_app_email}}aboutActions[aboutButtons.push('Email') - 1] = 'email';{{/has_app_email}}
             const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About {{{app_name}}}',
@@ -265,9 +268,10 @@ function createMenu() {
               defaultId: 0,
               cancelId: 0
             });
-            {{#has_app_homepage}}
-            if (aboutResult.response === 1) await shell.openExternal('{{{app_homepage}}}');
-            {{/has_app_homepage}}
+            const aboutAction = aboutActions[aboutResult.response];
+            {{#updates_enabled}}if (aboutAction === 'update') checkForUpdatesInteractive();{{/updates_enabled}}
+            {{#has_app_homepage}}if (aboutAction === 'homepage') await shell.openExternal('{{{app_homepage}}}');{{/has_app_homepage}}
+            {{#has_app_email}}if (aboutAction === 'email') await shell.openExternal('mailto:{{{app_email}}}');{{/has_app_email}}
           }
         }
       ]
@@ -387,11 +391,14 @@ function createMenu() {
               'Version {{{app_version}}}',
               {{#has_app_description}}'', '{{{app_description}}}',{{/has_app_description}}
               {{#has_app_author}}'', 'Author: {{{app_author}}}',{{/has_app_author}}
-              {{#has_app_email}}'Email: {{{app_email}}}',{{/has_app_email}}
               {{#has_app_copyright}}'', '{{{app_copyright}}}',{{/has_app_copyright}}
               '', 'Built with shinyelectron'
             ].join('\n');
-            const aboutButtons = ['OK'{{#has_app_homepage}}, 'Open Homepage'{{/has_app_homepage}}];
+            const aboutButtons = ['OK'];
+            const aboutActions = [];
+            {{#updates_enabled}}aboutActions[aboutButtons.push('Check for Updates') - 1] = 'update';{{/updates_enabled}}
+            {{#has_app_homepage}}aboutActions[aboutButtons.push('Visit Website') - 1] = 'homepage';{{/has_app_homepage}}
+            {{#has_app_email}}aboutActions[aboutButtons.push('Email') - 1] = 'email';{{/has_app_email}}
             const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About {{{app_name}}}',
@@ -401,9 +408,10 @@ function createMenu() {
               defaultId: 0,
               cancelId: 0
             });
-            {{#has_app_homepage}}
-            if (aboutResult.response === 1) await shell.openExternal('{{{app_homepage}}}');
-            {{/has_app_homepage}}
+            const aboutAction = aboutActions[aboutResult.response];
+            {{#updates_enabled}}if (aboutAction === 'update') checkForUpdatesInteractive();{{/updates_enabled}}
+            {{#has_app_homepage}}if (aboutAction === 'homepage') await shell.openExternal('{{{app_homepage}}}');{{/has_app_homepage}}
+            {{#has_app_email}}if (aboutAction === 'email') await shell.openExternal('mailto:{{{app_email}}}');{{/has_app_email}}
           }
         }
       ]
@@ -477,6 +485,44 @@ function setupAutoUpdater() {
   autoUpdater.on('error', (err) => {
     updaterLog.error('AutoUpdater error:', err);
   });
+}
+
+// Interactive "Check for Updates" (used by the About dialog): reports the
+// outcome instead of silently doing nothing when already up to date.
+async function checkForUpdatesInteractive() {
+  const { dialog } = require('electron');
+  const detached = () => {
+    autoUpdater.removeListener('update-not-available', onNone);
+    autoUpdater.removeListener('update-available', onAvailable);
+    autoUpdater.removeListener('error', onError);
+  };
+  const onNone = () => {
+    detached();
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Check for Updates',
+      message: 'You are up to date',
+      detail: `Version ${app.getVersion()} is the latest version.`
+    });
+  };
+  const onAvailable = () => {
+    // An update was found; setupAutoUpdater() downloads it and prompts to
+    // restart once it is ready.
+    detached();
+  };
+  const onError = (err) => {
+    detached();
+    dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Check for Updates',
+      message: 'Could not check for updates',
+      detail: String((err && err.message) || err)
+    });
+  };
+  autoUpdater.on('update-not-available', onNone);
+  autoUpdater.on('update-available', onAvailable);
+  autoUpdater.on('error', onError);
+  autoUpdater.checkForUpdatesAndNotify();
 }
 {{/updates_enabled}}
 
