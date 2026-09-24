@@ -66,14 +66,18 @@ generate_package_json <- function(app_slug, app_version, backend, config,
     pkg$dependencies <- deps
   }
 
+  # Resolve the display name once and derive a GitHub-safe artifact prefix
+  # from it. GitHub Releases rewrites spaces in asset names and electron-updater
+  # builds the download URL from latest.yml's path, so a product name with
+  # spaces (possible for a custom display name) would 404 the update.
+  product_name <- config$app$product_name %||% app_name %||% app_slug
+  product_name_safe <- gsub("[^A-Za-z0-9._-]+", "-", product_name)
+
   # Build configuration
   build_config <- list(
     appId = config$installer$app_id %||% paste0("com.shinyelectron.", app_slug),
-    productName = config$app$product_name %||% app_name %||% app_slug,
-    # Space-free artifact name: GitHub Releases rewrites spaces in asset names,
-    # and electron-updater's GitHub provider builds the download URL from
-    # latest.yml's path, so a name with spaces 404s the auto-update download.
-    artifactName = "${productName}-Setup-${version}.${ext}",
+    productName = product_name,
+    artifactName = paste0(product_name_safe, "-Setup-${version}.${ext}"),
     directories = list(output = "dist")
   )
 

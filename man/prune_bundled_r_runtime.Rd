@@ -32,9 +32,10 @@ libraries, data, HTML widgets or help databases.
 }
 \details{
 For the bundled package library it removes, from each installed package:
-\verb{include/}, \verb{tests/}, \verb{testme/}, \verb{tinytest/}, \verb{examples/}, \verb{demo/} and
-root-level \verb{NEWS*} / \verb{CHANGELOG*} files. For the portable R distribution it
-removes top-level \verb{doc/}, \verb{tests/} and \verb{include/}. \verb{share/}, \verb{Tcl/}, \verb{bin/},
-\verb{etc/}, \verb{modules/}, \verb{library/} and \verb{src/} are always kept.
+\verb{tests/}, \verb{testme/}, \verb{tinytest/}, \verb{examples/}, \verb{demo/} and root-level
+\verb{NEWS*} / \verb{CHANGELOG*} files. For the portable R distribution it removes
+top-level \verb{doc/} and \verb{tests/}. \verb{include/} (C/C++ and R headers needed by
+\code{Rcpp::sourceCpp()} / rstan at runtime) is always kept, along with \verb{share/},
+\verb{Tcl/}, \verb{bin/}, \verb{etc/}, \verb{modules/}, \verb{library/} and \verb{src/}.
 }
 \keyword{internal}

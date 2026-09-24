@@ -52,7 +52,7 @@ test_that("prune_bundled_r_runtime prunes allowlists and keeps runtime files", {
   res <- prune_bundled_r_runtime(root, verbose = FALSE)
 
   pkg <- file.path(root, "library", "pkgA")
-  expect_false(dir.exists(file.path(pkg, "include")))
+  expect_true(dir.exists(file.path(pkg, "include")))   # headers are kept
   expect_false(dir.exists(file.path(pkg, "tests")))
   expect_false(dir.exists(file.path(pkg, "examples")))
   expect_false(file.exists(file.path(pkg, "NEWS.md")))
@@ -64,7 +64,7 @@ test_that("prune_bundled_r_runtime prunes allowlists and keeps runtime files", {
   pr <- file.path(root, "portable-r-9.9.9-win-x64")
   expect_false(dir.exists(file.path(pr, "doc")))
   expect_false(dir.exists(file.path(pr, "tests")))
-  expect_false(dir.exists(file.path(pr, "include")))
+  expect_true(dir.exists(file.path(pr, "include")))   # headers are kept
   expect_true(dir.exists(file.path(pr, "Tcl")))
   expect_true(dir.exists(file.path(pr, "share", "zoneinfo")))
   expect_true(dir.exists(file.path(pr, "library", "base")))

@@ -536,8 +536,14 @@ class NativeRBackend extends EventEmitter {
     this.emit('status', { phase: 'stopping_server', message: 'Stopping R server...' });
     if (this.rProcess) {
       logDebug('Stopping R Shiny server...');
-      killProcessTree(this.rProcess);
+      const child = this.rProcess;
       this.rProcess = null;
+      // Emit app_exit only after the child has actually exited (its 'close'
+      // event), so callers that wait on it (e.g. the auto-updater handoff) do
+      // not race a still-running process.
+      child.once('close', () => this.emit('status', { phase: 'app_exit' }));
+      killProcessTree(child);
+      return;
     }
     this.emit('status', { phase: 'app_exit' });
   }

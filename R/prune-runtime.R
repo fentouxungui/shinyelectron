@@ -1,16 +1,18 @@
-# Names removed from every installed R package (allowlist). `include/` holds
-# C/C++ headers used only to compile dependent packages; the rest are tests,
-# examples and changelogs. Package code, compiled libs, data, HTML widgets and
-# help databases are deliberately kept.
-.r_library_prune_dirs <- c("include", "tests", "testme", "tinytest",
+# Names removed from every installed R package (allowlist). These are tests,
+# examples and changelogs only. `include/` (C/C++ headers) is deliberately
+# KEPT: a bundled app may compile code at runtime via Rcpp::sourceCpp() or
+# rstan, which need the headers. Package code, compiled libs, data, HTML
+# widgets and help databases are kept too.
+.r_library_prune_dirs <- c("tests", "testme", "tinytest",
                            "examples", "demo")
 .r_library_prune_files <- c("NEWS", "NEWS.md", "NEWS.Rd",
                             "CHANGELOG", "CHANGELOG.md")
 
 # Names removed from the portable R distribution (allowlist). `share/` carries
-# timezone/encoding data R needs at runtime and `Tcl/` may be needed by tcltk,
-# so both -- along with bin/, etc/, modules/, library/ and src/ -- are kept.
-.r_runtime_prune_dirs <- c("doc", "tests", "include")
+# timezone/encoding data R needs at runtime, `Tcl/` may be needed by tcltk, and
+# `include/` holds the R headers used by Rcpp::sourceCpp()/rstan, so all -- along
+# with bin/, etc/, modules/, library/ and src/ -- are kept.
+.r_runtime_prune_dirs <- c("doc", "tests")
 
 #' Remove allowlisted paths under one directory
 #'
@@ -57,10 +59,11 @@ prune_r_paths <- function(dir, dir_names = character(0),
 #' libraries, data, HTML widgets or help databases.
 #'
 #' For the bundled package library it removes, from each installed package:
-#' `include/`, `tests/`, `testme/`, `tinytest/`, `examples/`, `demo/` and
-#' root-level `NEWS*` / `CHANGELOG*` files. For the portable R distribution it
-#' removes top-level `doc/`, `tests/` and `include/`. `share/`, `Tcl/`, `bin/`,
-#' `etc/`, `modules/`, `library/` and `src/` are always kept.
+#' `tests/`, `testme/`, `tinytest/`, `examples/`, `demo/` and root-level
+#' `NEWS*` / `CHANGELOG*` files. For the portable R distribution it removes
+#' top-level `doc/` and `tests/`. `include/` (C/C++ and R headers needed by
+#' `Rcpp::sourceCpp()` / rstan at runtime) is always kept, along with `share/`,
+#' `Tcl/`, `bin/`, `etc/`, `modules/`, `library/` and `src/`.
 #'
 #' @param runtime_dir Character. The embedded `runtime/R` directory.
 #' @param prune_library Logical. Prune the bundled package library.

@@ -50,11 +50,10 @@ function waitForServer(port, { timeout = 30000, interval = 500 } = {}) {
         }
       });
 
-      // Cap this attempt by the remaining overall budget rather than a small
-      // fixed value. A slow-but-healthy first render (which can take many
-      // seconds) must be allowed to finish; the total deadline still bounds
-      // the wait, so this cannot hang forever.
-      req.setTimeout(Math.max(1000, remaining), () => {
+      // Cap each attempt: long enough for a slow-but-healthy first render, but
+      // not the whole budget, so a stalled connection cannot block polling
+      // until the overall deadline. The retry loop keeps polling meanwhile.
+      req.setTimeout(Math.min(8000, Math.max(1000, remaining)), () => {
         req.destroy();
         if (Date.now() - start > timeout) {
           fail();

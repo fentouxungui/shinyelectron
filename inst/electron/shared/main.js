@@ -261,8 +261,8 @@ function createMenu() {
             {{#has_app_email}}aboutActions[aboutButtons.push('Email') - 1] = 'email';{{/has_app_email}}
             const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About {{{app_name}}}',
-              message: '{{{app_name}}}',
+              title: 'About {{{app_name_js}}}',
+              message: '{{{app_name_js}}}',
               detail: aboutDetail,
               buttons: aboutButtons,
               defaultId: 0,
@@ -401,8 +401,8 @@ function createMenu() {
             {{#has_app_email}}aboutActions[aboutButtons.push('Email') - 1] = 'email';{{/has_app_email}}
             const aboutResult = await dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About {{{app_name}}}',
-              message: '{{{app_name}}}',
+              title: 'About {{{app_name_js}}}',
+              message: '{{{app_name_js}}}',
               detail: aboutDetail,
               buttons: aboutButtons,
               defaultId: 0,

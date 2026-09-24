@@ -427,18 +427,22 @@ install_local_r_packages <- function(bundled_rscript, local_packages, lib_path,
   paths <- normalizePath(unlist(local_packages), winslash = "/", mustWork = TRUE)
   lib <- gsub("\\\\", "/", lib_path)
   names <- local_r_package_names(paths)
-  pkg_str <- paste0("'", paths, "'", collapse = ", ")
-  names_str <- paste0("'", names, "'", collapse = ", ")
+  # Emit paths/names as proper R string literals so an apostrophe or backslash
+  # in a path cannot produce an unparsable -e expression.
+  r_lit <- function(x) encodeString(x, quote = "'")
+  lib_lit <- r_lit(lib)
+  pkg_lit <- paste(vapply(paths, r_lit, character(1)), collapse = ", ")
+  names_lit <- paste(vapply(names, r_lit, character(1)), collapse = ", ")
   r_code <- sprintf(
     paste0(
-      ".libPaths(c('%s', .libPaths())); ",
-      "Sys.setenv(R_LIBS = '%s', R_LIBS_USER = '%s', R_LIBS_SITE = '%s'); ",
-      "install.packages(c(%s), lib = '%s', repos = NULL, type = 'source', ",
+      ".libPaths(c(%s, .libPaths())); ",
+      "Sys.setenv(R_LIBS = %s, R_LIBS_USER = %s, R_LIBS_SITE = %s); ",
+      "install.packages(c(%s), lib = %s, repos = NULL, type = 'source', ",
       "dependencies = FALSE, INSTALL_opts = c('--no-staged-install', '--no-clean-on-error')); ",
-      "missing <- setdiff(c(%s), rownames(installed.packages(lib.loc = '%s'))); ",
+      "missing <- setdiff(c(%s), rownames(installed.packages(lib.loc = %s))); ",
       "if (length(missing)) stop('local package install failed: ', paste(missing, collapse = ', '))"
     ),
-    lib, lib, lib, lib, pkg_str, lib, names_str, lib
+    lib_lit, lib_lit, lib_lit, lib_lit, pkg_lit, lib_lit, names_lit, lib_lit
   )
   if (verbose) cli::cli_alert_info("Installing local R package(s) from source...")
   result <- processx::run(
@@ -447,9 +451,14 @@ install_local_r_packages <- function(bundled_rscript, local_packages, lib_path,
     error_on_status = FALSE, echo = verbose, timeout = 600
   )
   present <- vapply(names, function(nm) {
-    fs::file_exists(fs::path(lib, nm, "Meta", "package.rds")) &&
+    has_loader <- fs::file_exists(fs::path(lib, nm, "R", nm))
+    has_rdb <- fs::file_exists(fs::path(lib, nm, "R", paste0(nm, ".rdb")))
+    fs::file_exists(fs::path(lib, nm, "DESCRIPTION")) &&
+      fs::file_exists(fs::path(lib, nm, "Meta", "package.rds")) &&
       fs::file_exists(fs::path(lib, nm, "NAMESPACE")) &&
-      fs::file_exists(fs::path(lib, nm, "R", paste0(nm, ".rdb")))
+      # Packages that opt out of lazy loading (LazyLoad: no) or ship no R code
+      # legitimately have no .rdb; require it only when a loader file exists.
+      (!has_loader || has_rdb)
   }, logical(1))
   missing <- names[!present]
   if (length(missing) > 0) {
@@ -476,21 +485,22 @@ install_local_r_packages <- function(bundled_rscript, local_packages, lib_path,
 }
 local_install_diagnostic <- function(bundled_rscript, paths, lib, names) {
   pkgname <- names[[1]]
+  lit <- function(x) encodeString(x, quote = "'")
   diag_code <- sprintf(
     paste0(
-      ".libPaths(c('%s', .libPaths())); ",
-      "Sys.setenv(R_LIBS = '%s', R_LIBS_USER = '%s', R_LIBS_SITE = '%s'); ",
+      ".libPaths(c(%s, .libPaths())); ",
+      "Sys.setenv(R_LIBS = %s, R_LIBS_USER = %s, R_LIBS_SITE = %s); ",
       "td <- tempfile('seldiag'); dir.create(td); ",
-      "utils::untar('%s', exdir = td); ",
-      "setwd(file.path(td, '%s')); ",
+      "utils::untar(%s, exdir = td); ",
+      "setwd(file.path(td, %s)); ",
       "cat('LIBS:', paste(.libPaths(), collapse = ' | ')); ",
       "res1 <- tryCatch({ suppressPackageStartupMessages(.getRequiredPackages(quietly = TRUE)); 'OK' }, error = function(e) paste('ERR', conditionMessage(e))); ",
       "cat(' GETREQ:', res1); ",
-      "cat(' LIBPKGS:', paste(intersect(list.dirs('%s', recursive = FALSE, full.names = FALSE), c('Seurat','SeuratObject','ggplot2','dplyr','shiny','rlang','DT','qs2','shinyjqui')), collapse = ',')); ",
+      "cat(' LIBPKGS:', paste(intersect(list.dirs(%s, recursive = FALSE, full.names = FALSE), c('Seurat','SeuratObject','ggplot2','dplyr','shiny','rlang','DT','qs2','shinyjqui')), collapse = ',')); ",
       "cat(' NSLOADED:', paste(intersect(loadedNamespaces(), c('Seurat','SeuratObject','ggplot2','dplyr','shiny','rlang')), collapse = ',')); ",
       "cat(' DONE')"
     ),
-    lib, lib, lib, lib, paths[[1]], pkgname, lib
+    lit(lib), lit(lib), lit(lib), lit(lib), lit(paths[[1]]), lit(pkgname), lit(lib)
   )
   diag <- processx::run(
     bundled_rscript, c("--vanilla", "-e", diag_code),

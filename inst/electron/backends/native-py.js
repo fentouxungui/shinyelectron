@@ -552,8 +552,14 @@ class NativePyBackend extends EventEmitter {
     if (this.pyProcess) {
       logDebug('Stopping Python Shiny server...');
       this.emit('status', { phase: 'stopping_server', message: 'Stopping Python Shiny server...' });
-      killProcessTree(this.pyProcess);
+      const child = this.pyProcess;
       this.pyProcess = null;
+      // Emit app_exit only after the child has actually exited (its 'close'
+      // event), so callers that wait on it (e.g. the auto-updater handoff) do
+      // not race a still-running process.
+      child.once('close', () => this.emit('status', { phase: 'app_exit' }));
+      killProcessTree(child);
+      return;
     }
     this.emit('status', { phase: 'app_exit' });
   }
