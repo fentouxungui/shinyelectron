@@ -157,7 +157,7 @@ copy_backend_modules <- function(output_dir, backend_module, is_multi_app) {
 
   # Always ship shared helpers: every backend imports from utils.js;
   # native backends use dependency-checker; auto-download uses runtime-downloader
-  for (f in c("utils.js", "dependency-checker.js", "runtime-downloader.js")) {
+  for (f in c("utils.js", "dependency-checker.js", "runtime-downloader.js", "appstore.js")) {
     src <- fs::path(backends_dir, f)
     if (fs::file_exists(src)) {
       fs::file_copy(src, fs::path(backend_dest_dir, f), overwrite = TRUE)
