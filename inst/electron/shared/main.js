@@ -15,6 +15,7 @@ const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen } = require
 const path = require('path');
 const fs = require('fs');
 const backend = require('./backends/{{backend_module}}');
+const { createAppStore, cmpVersion } = require('./backends/appstore');
 
 // File logging -- writes to configured log directory or app userData
 const LOG_LEVEL = '{{{log_level_js}}}';
@@ -81,6 +82,7 @@ let lastSelectedAppId = null;
 let sharedShinyliveServer = null;
 let sharedShinylivePort = null;
 let isLauncherVisible = true;   // true while the launcher page is shown (multi-app)
+let appStore = null;
 
 // Stop the persistent shinylive server. Called ONLY at quit; the launcher
 // teardown sites deliberately leave it running so the origin (and its
@@ -749,6 +751,74 @@ function createWindow() {
   });
   {{/menu_enabled}}
 
+  // --- App store wiring (multi-app) -------------------------------------
+  function storeStartBackend(opts) {
+    return new Promise(function (resolve, reject) {
+      if (currentBackend && currentBackend !== sharedShinyliveServer) {
+        currentBackend.removeAllListeners();
+        currentBackend.stop();
+      }
+      currentBackend = getBackendForApp('r-shiny', 'bundled');
+      currentBackend.on('status', function (data) {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifecycle-status', data);
+        if (data.phase === 'server_ready') serverRunning = true;
+        if (data.phase === 'stopping_server' || data.phase === 'error' || data.phase === 'server_crashed') serverRunning = false;
+      });
+      currentBackend.on('error', function (err) {
+        log('error', 'store backend error:', err && err.message ? err.message : err);
+      });
+      mainWindow.loadFile('lifecycle.html');
+      var b = currentBackend;
+      b.start({
+        appPath: opts.appPath,
+        port: port,
+        config: Object.assign({}, {{{backend_config_json}}}, {
+          app_type: 'r-shiny',
+          app_id: opts.appId,
+          runtime_strategy: 'bundled',
+          extra_lib_paths: opts.libPaths
+        })
+      }).then(function (result) {
+        actualPort = result.port;
+        mainWindow.loadURL('http://localhost:' + actualPort);
+        resolve({
+          stop: function () {
+            return new Promise(function (done) {
+              var onExit = function (d) { if (d && d.phase === 'app_exit') { b.removeListener('status', onExit); done(); } };
+              b.on('status', onExit);
+              b.stop();
+              setTimeout(done, 120000);
+            });
+          }
+        });
+      }).catch(reject);
+    });
+  }
+
+  if (appsManifest) {
+    appStore = createAppStore({
+      userDataDir: app.getPath('userData'),
+      catalogUrl: 'https://fentouxungui.github.io/ShinyApps/catalog.json',
+      startBackend: storeStartBackend,
+      log: function (m) { log('info', '[store]', m); }
+    });
+    ipcMain.handle('store-list', async () => {
+      const cat = await appStore.fetchCatalog();
+      const st = appStore.getState();
+      return cat.apps.map((a) => {
+        const ins = st.apps[a.id];
+        return {
+          id: a.id, name: a.name, description: a.description, icon: a.icon,
+          catalogVersion: a.version,
+          installed: !!ins, installedVersion: ins ? ins.version : null,
+          updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0,
+          running: appStore.isRunning(a.id),
+          state: ins ? 'installed' : 'not-installed'
+        };
+      });
+    });
+  }
+
   // Multi-app: load launcher instead of starting backend immediately
   if (appsManifest) {
     mainWindow.loadFile('launcher.html');
@@ -991,7 +1061,7 @@ function createWindow() {
   // Handle IPC actions from lifecycle.html and launcher.html (retry, quit, select_app, etc.)
   // Wrapped in try/catch: a backend emit or getBackendForApp throwing
   // should not crash the Electron main process silently.
-  ipcMain.on('lifecycle-action', (_event, action) => {
+  ipcMain.on('lifecycle-action', async (_event, action) => {
     try {
     var actionType = typeof action === 'string' ? action : action.type;
 
@@ -1029,6 +1099,31 @@ function createWindow() {
 
     } else if (actionType === 'back_to_launcher') {
       leaveToLauncher();
+
+    } else if (actionType === 'install_app' || actionType === 'uninstall_app' || actionType === 'update_app') {
+      if (!appStore) return;
+      var storeId = action.appId;
+      var sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
+      var storeJob = actionType === 'install_app'
+        ? function () { return appStore.install(storeId, function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.phase }); }); }
+        : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId); };
+      try {
+        sendStore({ state: 'installing', statusText: 'working...' });
+        await storeJob();
+        sendStore({ state: 'done' });
+      } catch (e) {
+        sendStore({ state: 'error', error: (e && e.message) || String(e) });
+      }
+
+    } else if (actionType === 'run_app') {
+      if (!appStore) return;
+      try { await appStore.run(action.appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: action.appId, state: 'done' });
+
+    } else if (actionType === 'stop_app') {
+      if (!appStore) return;
+      try { await appStore.stop(action.appId); } catch (e) { log('error', 'stop_app failed:', e && e.message); }
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: action.appId, state: 'done' });
     }
     } catch (err) {
       log('error', 'IPC action failed:', err && err.message ? err.message : err);

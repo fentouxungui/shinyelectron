@@ -464,10 +464,18 @@ class NativeRBackend extends EventEmitter {
 
       // Build .libPaths() with bundled lib (if exists) and user lib (if set)
       // Escape paths to prevent R code injection via crafted directory names
+      // const libPaths = [];
+      // if (fs.existsSync(bundledLib)) libPaths.push(bundledLib.replace(/\\/g, '/').replace(/"/g, '\\"'));
+      // if (userLibPath) libPaths.push(userLibPath.replace(/\\/g, '/').replace(/"/g, '\\"'));
+      const esc = (p) => p.replace(/\\/g, '/').replace(/"/g, '\\"');
       const libPaths = [];
-      if (fs.existsSync(bundledLib)) libPaths.push(bundledLib.replace(/\\/g, '/').replace(/"/g, '\\"'));
-      if (userLibPath) libPaths.push(userLibPath.replace(/\\/g, '/').replace(/"/g, '\\"'));
-
+      // App-store extras (app private lib : shared lib), highest priority.
+      if (config && Array.isArray(config.extra_lib_paths)) {
+        for (const p of config.extra_lib_paths) if (p && fs.existsSync(p)) libPaths.push(esc(p));
+      }
+      if (fs.existsSync(bundledLib)) libPaths.push(esc(bundledLib));
+      if (userLibPath) libPaths.push(esc(userLibPath));
+      
       const safeAppPath = appPath.replace(/\\/g, '/').replace(/'/g, "\\'").replace(/"/g, '\\"');
 
       let rCode;
