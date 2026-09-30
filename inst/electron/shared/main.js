@@ -240,6 +240,43 @@ async function showAboutDialog() {
   if (actions[response]) await actions[response]();
 }
 
+  // Return to the launcher: confirm first (unsaved analysis is discarded),
+  // then wait for the backend to actually exit before showing the launcher.
+  function leaveToLauncher() {
+    if (!appsManifest) return;
+    var cur = appsManifest.apps.find(function(a) { return a.id === lastSelectedAppId; });
+    var curName = (cur && cur.name) || '{{{app_name_js}}}';
+
+    var { dialog } = require('electron');
+    dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      buttons: ['Leave app', 'Cancel'],
+      defaultId: 1, cancelId: 1, noLink: true,
+      title: 'Return to launcher',
+      message: 'Return to the launcher?',
+      detail: 'Any unsaved analysis in "' + curName + '" will be lost.'
+    }).then(function(res) {
+      if (res.response !== 0) return;
+      if (currentBackend && currentBackend !== sharedShinyliveServer) {
+        var b = currentBackend;
+        currentBackend = null;            // prevent a double stop on a later action
+        var settled = false;
+        var finish = function() {
+          if (settled) return; settled = true;
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+        };
+        var fallback = setTimeout(function() { b.removeAllListeners(); finish(); }, {{shutdown_timeout}});
+        b.on('status', function(d) {
+          if (d && d.phase === 'app_exit') { clearTimeout(fallback); b.removeAllListeners(); finish(); }
+        });
+        b.stop();
+      } else {
+        currentBackend = null;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+      }
+    });
+  }
+
 function createMenu() {
   const isMac = process.platform === 'darwin';
 
@@ -277,16 +314,7 @@ function createMenu() {
         {
           label: 'Back to Launcher',
           accelerator: 'CmdOrCtrl+L',
-          click: () => {
-            // Leave the shared shinylive server running; only tear down a
-            // per-app native/container backend.
-            if (currentBackend && currentBackend !== sharedShinyliveServer) {
-              currentBackend.removeAllListeners();
-              currentBackend.stop();
-            }
-            currentBackend = null;
-            if (mainWindow) mainWindow.loadFile('launcher.html');
-          }
+          click: () => { leaveToLauncher(); }
         }
       ]
     },
@@ -393,16 +421,7 @@ function createMenu() {
         {
           label: 'Back to Launcher',
           accelerator: 'CmdOrCtrl+L',
-          click: () => {
-            // Leave the shared shinylive server running; only tear down a
-            // per-app native/container backend.
-            if (currentBackend && currentBackend !== sharedShinyliveServer) {
-              currentBackend.removeAllListeners();
-              currentBackend.stop();
-            }
-            currentBackend = null;
-            if (mainWindow) mainWindow.loadFile('launcher.html');
-          }
+          click: () => { leaveToLauncher(); }
         }
       ]
     },
@@ -991,13 +1010,7 @@ function createWindow() {
       startSelectedApp(action.appId);
 
     } else if (actionType === 'back_to_launcher') {
-      // Leave the shared shinylive server running; only stop a per-app backend.
-      if (currentBackend && currentBackend !== sharedShinyliveServer) {
-        currentBackend.removeAllListeners();
-        currentBackend.stop();
-      }
-      currentBackend = null;
-      mainWindow.loadFile('launcher.html');
+      leaveToLauncher();
     }
     } catch (err) {
       log('error', 'IPC action failed:', err && err.message ? err.message : err);
