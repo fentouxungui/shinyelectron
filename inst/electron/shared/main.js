@@ -80,6 +80,7 @@ let actualPort = null;
 let lastSelectedAppId = null;
 let sharedShinyliveServer = null;
 let sharedShinylivePort = null;
+let isLauncherVisible = true;   // true while the launcher page is shown (multi-app)
 
 // Stop the persistent shinylive server. Called ONLY at quit; the launcher
 // teardown sites deliberately leave it running so the origin (and its
@@ -457,7 +458,11 @@ function createMenu() {
   ];
   {{/menu_minimal}}
 
-  const menu = Menu.buildFromTemplate(template);
+  // On the launcher there is no app to leave, so hide the whole "Apps" menu.
+  const visibleTemplate = (appsManifest && isLauncherVisible)
+    ? template.filter((item) => item.label !== 'Apps')
+    : template;
+  const menu = Menu.buildFromTemplate(visibleTemplate);
   Menu.setApplicationMenu(menu);
 }
 {{/menu_enabled}}
@@ -730,6 +735,19 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     log('error', `[renderer] process gone: ${details && details.reason}`);
   });
+
+  {{#menu_enabled}}
+  // Keep the "Apps" menu in sync with what is on screen: it only makes sense
+  // while an app is open, so hide it on the launcher.
+  mainWindow.webContents.on('did-finish-load', () => {
+    const url = mainWindow.webContents.getURL() || '';
+    const onLauncher = url.indexOf('launcher.html') !== -1;
+    if (onLauncher !== isLauncherVisible) {
+      isLauncherVisible = onLauncher;
+      createMenu();
+    }
+  });
+  {{/menu_enabled}}
 
   // Multi-app: load launcher instead of starting backend immediately
   if (appsManifest) {
