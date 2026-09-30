@@ -1,26 +1,17 @@
 'use strict';
 /**
  * App-layer store for the ShinyApps shell (Electron main process).
+ * Zero npm dependencies (Node built-in zlib for zip extraction).
  *
- * Install / run / uninstall / update single Shiny apps from a catalog of
- * prebuilt bundles (GitHub Releases), using a SHARED, reference-counted R
- * package library. "Installing" a package means COPYING a prebuilt package
- * directory -- never compiling. Zero npm dependencies (uses only Node's
- * built-in zlib for zip extraction).
+ * Robust bundle download: progress + idle timeout + resume (HTTP Range)
+ * + retry + size/checksum verification.
  *
  * Layout under <userData>:
  *   state.json            install state (see state.schema.json)
  *   apps/<id>/<version>/  unpacked bundle (app/ + rlib/ + manifest.json)
  *   lib/<Pkg>/            shared R library (ref-counted)
  *   private/<id>/<Pkg>/   per-app library used on version conflict
- *   cache/                downloaded bundles + catalog cache
- *
- * Wire-in (from main.js):
- *   - runtimeRscript : the shell's bundled Rscript
- *   - startBackend   : native-r backend; must spawn R with .libPaths() including
- *                      `libPaths` (an ARRAY: [private, shared]) and return
- *                      { stop } killing the whole process tree.
- *   - catalogUrl     : https://fentouxungui.github.io/ShinyApps/catalog.json
+ *   store-cache/          downloaded bundles (distinct from Electron's Cache/)
  */
 
 const fs = require('fs');
@@ -30,38 +21,85 @@ const https = require('https');
 const crypto = require('crypto');
 const zlib = require('zlib');
 
-// ---------------------------------------------------------------- http/fs
-function httpGet(url, redirects = 5) {
+const REDIRECT = [301, 302, 303, 307, 308];
+
+function httpGet(url, headers = {}, redirects = 5) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'ShinyApps' } }, (res) => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
-        if (redirects <= 0) return reject(new Error('too many redirects'));
+    const req = https.get(url, { headers: Object.assign({ 'User-Agent': 'ShinyApps' }, headers) }, (res) => {
+      if (REDIRECT.includes(res.statusCode) && res.headers.location) {
+        if (redirects <= 0) { res.resume(); return reject(new Error('too many redirects')); }
         res.resume();
-        return resolve(httpGet(res.headers.location, redirects - 1));
+        return resolve(httpGet(res.headers.location, headers, redirects - 1));
       }
-      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode} for ${url}`)); }
       resolve(res);
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => req.destroy(new Error('connection timeout')));
   });
 }
 
 async function downloadToString(url) {
   const res = await httpGet(url);
+  if (res.statusCode !== 200) { res.resume(); throw new Error('HTTP ' + res.statusCode + ' for ' + url); }
   const chunks = [];
   for await (const c of res) chunks.push(c);
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function downloadToFile(url, dest) {
-  const res = await httpGet(url);
+/**
+ * Download url -> dest with resume/retry and byte progress.
+ * opts: { onProgress(frac, received, total), expectedSize, idleMs, attempts, log }
+ */
+async function downloadToFile(url, dest, opts = {}) {
+  const onProgress = opts.onProgress || (() => {});
+  const expectedSize = opts.expectedSize || 0;
+  const idleMs = opts.idleMs || 60000;
+  const attempts = opts.attempts || 5;
+  const log = opts.log || (() => {});
+  const part = dest + '.part';
   await fsp.mkdir(path.dirname(dest), { recursive: true });
-  await new Promise((resolve, reject) => {
-    const out = fs.createWriteStream(dest);
-    res.pipe(out);
-    out.on('finish', resolve);
-    out.on('error', reject);
-    res.on('error', reject);
-  });
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let start = 0;
+    try { start = fs.statSync(part).size; } catch (e) { start = 0; }
+    try {
+      const res = await httpGet(url, start > 0 ? { Range: `bytes=${start}-` } : {});
+      let status = res.statusCode;
+      if (start > 0 && status === 200) start = 0; // server ignored Range
+      if (status !== 200 && status !== 206) { res.resume(); throw new Error('HTTP ' + status + ' for ' + url); }
+      const len = Number(res.headers['content-length'] || 0);
+      const total = (status === 206 ? start : 0) + len;
+      const out = fs.createWriteStream(part, { flags: start > 0 ? 'a' : 'w' });
+      let received = start;
+      let idle = setTimeout(() => res.destroy(new Error('download stalled')), idleMs);
+      await new Promise((resolve, reject) => {
+        res.on('data', (c) => {
+          received += c.length;
+          clearTimeout(idle);
+          idle = setTimeout(() => res.destroy(new Error('download stalled')), idleMs);
+          onProgress(total ? received / total : 0, received, total);
+        });
+        res.pipe(out);
+        out.on('finish', resolve);
+        out.on('error', reject);
+        res.on('error', reject);
+      });
+      clearTimeout(idle);
+
+      const size = fs.statSync(part).size;
+      const want = total || expectedSize;
+      if (want && size < want) throw new Error('incomplete download ' + size + '/' + want);
+      await fsp.rm(dest, { force: true });
+      await fsp.rename(part, dest);
+      return size;
+    } catch (e) {
+      lastErr = e;
+      log(`download attempt ${attempt}/${attempts} failed: ${e.message}`);
+      onProgress(0, 0, expectedSize);
+    }
+  }
+  throw lastErr || new Error('download failed');
 }
 
 async function sha256File(file) {
@@ -87,11 +125,7 @@ function cmpVersion(a, b) {
   return 0;
 }
 
-/**
- * Extract a zip with only Node built-ins (zlib). Supports stored (0) and
- * deflate (8) entries, ZIP64, and guards against zip-slip. Random-access
- * reads keep memory bounded (does not load the whole archive).
- */
+/** Extract a zip with only Node built-ins. Stored/deflate, ZIP64, zip-slip safe. */
 async function unzip(zipPath, destDir) {
   const fd = fs.openSync(zipPath, 'r');
   try {
@@ -106,8 +140,6 @@ async function unzip(zipPath, destDir) {
       }
       return b.subarray(0, got);
     };
-
-    // End Of Central Directory (EOCD), searched from the end.
     const tailLen = Math.min(size, 65557);
     const tail = readAt(size - tailLen, tailLen);
     let eocd = -1;
@@ -115,19 +147,15 @@ async function unzip(zipPath, destDir) {
       if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
     }
     if (eocd < 0) throw new Error('not a zip (no EOCD found)');
-
     let entries = tail.readUInt16LE(eocd + 10);
     let cdSize = tail.readUInt32LE(eocd + 12);
     let cdOffset = tail.readUInt32LE(eocd + 16);
-
-    // ZIP64 when the 32-bit fields are saturated.
     if (entries === 0xffff || cdOffset === 0xffffffff || cdSize === 0xffffffff) {
       const locPos = (size - tailLen) + eocd - 20;
       if (locPos >= 0) {
         const loc = readAt(locPos, 20);
         if (loc.readUInt32LE(0) === 0x07064b50) {
-          const z64Pos = Number(loc.readBigUInt64LE(8));
-          const z64 = readAt(z64Pos, 56);
+          const z64 = readAt(Number(loc.readBigUInt64LE(8)), 56);
           if (z64.readUInt32LE(0) === 0x06064b50) {
             entries = Number(z64.readBigUInt64LE(32));
             cdSize = Number(z64.readBigUInt64LE(40));
@@ -136,11 +164,9 @@ async function unzip(zipPath, destDir) {
         }
       }
     }
-
     const cd = readAt(cdOffset, cdSize);
     const root = path.resolve(destDir);
     await fsp.mkdir(root, { recursive: true });
-
     let p = 0;
     for (let i = 0; i < entries; i++) {
       if (cd.readUInt32LE(p) !== 0x02014b50) throw new Error('bad central directory record');
@@ -152,8 +178,6 @@ async function unzip(zipPath, destDir) {
       const commentLen = cd.readUInt16LE(p + 32);
       let lho = cd.readUInt32LE(p + 42);
       const name = cd.subarray(p + 46, p + 46 + nameLen).toString('utf8');
-
-      // ZIP64 extra field (id 0x0001) for sizes/offset.
       if (compSize === 0xffffffff || uncompSize === 0xffffffff || lho === 0xffffffff) {
         let e = p + 46 + nameLen;
         const end = e + extraLen;
@@ -172,28 +196,15 @@ async function unzip(zipPath, destDir) {
       }
       p += 46 + nameLen + extraLen + commentLen;
       void uncompSize;
-
       const target = path.resolve(root, name);
-      if (target !== root && !target.startsWith(root + path.sep)) {
-        throw new Error('zip-slip entry rejected: ' + name);
-      }
-      if (name.endsWith('/')) {
-        await fsp.mkdir(target, { recursive: true });
-        continue;
-      }
-
+      if (target !== root && !target.startsWith(root + path.sep)) throw new Error('zip-slip entry rejected: ' + name);
+      if (name.endsWith('/')) { await fsp.mkdir(target, { recursive: true }); continue; }
       const lh = readAt(lho, 30);
       if (lh.readUInt32LE(0) !== 0x04034b50) throw new Error('bad local file header');
-      const lNameLen = lh.readUInt16LE(26);
-      const lExtraLen = lh.readUInt16LE(28);
-      const dataPos = lho + 30 + lNameLen + lExtraLen;
+      const dataPos = lho + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
       const comp = readAt(dataPos, compSize);
-
-      let data;
-      if (method === 0) data = comp;
-      else if (method === 8) data = zlib.inflateRawSync(comp);
-      else throw new Error('unsupported zip compression method ' + method);
-
+      const data = method === 0 ? comp : method === 8 ? zlib.inflateRawSync(comp)
+        : (() => { throw new Error('unsupported zip compression method ' + method); })();
       await fsp.mkdir(path.dirname(target), { recursive: true });
       await fsp.writeFile(target, data);
     }
@@ -211,13 +222,13 @@ function platformKey() {
 
 // ---------------------------------------------------------------- store
 function createAppStore(options) {
-  const { userDataDir, runtimeRscript, catalogUrl, startBackend, log = () => {} } = options;
+  const { userDataDir, catalogUrl, startBackend, log = () => {} } = options;
 
   const statePath = path.join(userDataDir, 'state.json');
   const appsDir = path.join(userDataDir, 'apps');
   const sharedLib = path.join(userDataDir, 'lib');
   const privateRoot = path.join(userDataDir, 'private');
-  const cacheDir = path.join(userDataDir, 'cache');
+  const cacheDir = path.join(userDataDir, 'store-cache');
   for (const d of [appsDir, sharedLib, privateRoot, cacheDir]) fs.mkdirSync(d, { recursive: true });
 
   let state = loadState();
@@ -232,7 +243,9 @@ function createAppStore(options) {
 
   async function fetchCatalog({ force = false } = {}) {
     if (catalog && !force) return catalog;
+    log('fetch catalog ' + catalogUrl);
     catalog = JSON.parse(await downloadToString(catalogUrl));
+    log('catalog apps: ' + catalog.apps.map((a) => a.id).join(', '));
     return catalog;
   }
   function catalogEntry(id) { return catalog && catalog.apps.find((a) => a.id === id); }
@@ -245,17 +258,27 @@ function createAppStore(options) {
     if (!art) throw new Error(`no bundle for ${plat} of ${id}`);
 
     const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
-    onProgress({ phase: 'downloading', percent: 0 });
-    await downloadToFile(art.url, zip);
+    log(`install ${id}@${entry.version} ${plat}: GET ${art.url} (${art.size || '?'} bytes)`);
+    onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' });
+    await downloadToFile(art.url, zip, {
+      expectedSize: art.size || 0,
+      log,
+      onProgress: (frac, got, total) => onProgress({
+        phase: 'downloading',
+        percent: Math.round((frac || 0) * 100),
+        statusText: 'downloading ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
+      }),
+    });
+    log(`downloaded ${zip} (${fs.statSync(zip).size} bytes)`);
 
-    onProgress({ phase: 'verifying' });
+    onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying' });
     const got = await sha256File(zip);
     if (art.sha256 && got !== art.sha256) {
       await fsp.rm(zip, { force: true });
       throw new Error(`checksum mismatch for ${id}`);
     }
 
-    onProgress({ phase: 'unpacking' });
+    onProgress({ phase: 'unpacking', percent: 100, statusText: 'unpacking' });
     const staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
     await fsp.rm(staging, { recursive: true, force: true });
     await unzip(zip, staging);
@@ -267,7 +290,7 @@ function createAppStore(options) {
     await fsp.rm(finalDir, { recursive: true, force: true });
     await fsp.rename(staging, finalDir);
 
-    onProgress({ phase: 'linking' });
+    onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
     await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
 
     state.apps[id] = {
@@ -275,7 +298,8 @@ function createAppStore(options) {
       packages: (manifest.packages || []).map((p) => p.name),
     };
     saveState();
-    onProgress({ phase: 'done', percent: 100 });
+    log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
+    onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
     return { id, version: manifest.version };
   }
 
@@ -292,7 +316,7 @@ function createAppStore(options) {
         log(`conflict: ${pkg.name} shared=${shared.version} wanted=${pkg.version} (${appId})`);
         await copyDir(src, path.join(privateRoot, appId, pkg.name));
       }
-      onProgress({ phase: 'linking' });
+      onProgress({ phase: 'linking', percent: 100, statusText: 'linking ' + pkg.name });
     }
     saveState();
   }
@@ -318,6 +342,7 @@ function createAppStore(options) {
     await pruneRefs(id, []);
     delete state.apps[id];
     saveState();
+    log(`uninstalled ${id}`);
   }
 
   async function run(id) {
@@ -325,8 +350,9 @@ function createAppStore(options) {
     if (!app) throw new Error(`${id} is not installed`);
     if (running.has(id)) return running.get(id);
     const appPath = path.join(app.dir, 'app');
-    const libPaths = [path.join(privateRoot, id), sharedLib]; // ARRAY: private > shared
-    const handle = await startBackend({ appId: id, appPath, libPaths, rscript: runtimeRscript });
+    const libPaths = [path.join(privateRoot, id), sharedLib];
+    log(`run ${id}: appPath=${appPath} libs=${libPaths.join(path.delimiter)}`);
+    const handle = await startBackend({ appId: id, appPath, libPaths });
     running.set(id, handle);
     return handle;
   }
