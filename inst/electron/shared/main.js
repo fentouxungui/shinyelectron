@@ -767,6 +767,12 @@ function createWindow() {
       currentBackend.on('error', function (err) {
         log('error', 'store backend error:', err && err.message ? err.message : err);
       });
+      // Clear the store running flag whenever the backend actually exits
+      // (e.g. after Back to Launcher stops it), so the launcher shows Run again.
+      currentBackend.on('status', function (d) {
+        if (d && d.phase === 'app_exit' && appStore) appStore.stop(opts.appId).catch(function () {});
+      });
+      lastSelectedAppId = opts.appId;
       mainWindow.loadFile('lifecycle.html');
       var b = currentBackend;
       b.start({
