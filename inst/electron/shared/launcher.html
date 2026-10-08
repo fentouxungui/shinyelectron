@@ -182,15 +182,30 @@
     if (window.lifecycle && window.lifecycle.onStoreStatus) {
       window.lifecycle.onStoreStatus(function (ev) {
         var app = byId[ev.id];
-        if (!app) return;
-        if (ev.state) app.state = ev.state;
-        if (typeof ev.percent === 'number') app.percent = ev.percent;
-        if (ev.statusText) app.statusText = ev.statusText;
-        if (ev.error) app.error = ev.error;
-        if (ev.installed !== undefined) app.installed = ev.installed;
-        if (ev.installedVersion !== undefined) app.installedVersion = ev.installedVersion;
-        if (ev.updateAvailable !== undefined) app.updateAvailable = ev.updateAvailable;
-        render();
+        if (app) {
+          if (ev.state) app.state = ev.state;
+          if (typeof ev.percent === 'number') app.percent = ev.percent;
+          if (ev.statusText) app.statusText = ev.statusText;
+          if (ev.error) app.error = ev.error;
+          if (ev.installed !== undefined) app.installed = ev.installed;
+          if (ev.installedVersion !== undefined) app.installedVersion = ev.installedVersion;
+          if (ev.updateAvailable !== undefined) app.updateAvailable = ev.updateAvailable;
+          if (ev.state === 'done') {
+            // Optimistic: reflect the just-finished action immediately so the
+            // Update button cannot linger if the async refresh is missed/raced.
+            if (ev.op === 'uninstall_app') {
+              app.installed = false;
+              app.updateAvailable = false;
+            } else if (ev.op === 'install_app' || ev.op === 'update_app') {
+              app.installed = true;
+              if (app.catalogVersion) app.installedVersion = app.catalogVersion;
+              app.updateAvailable = false;
+            }
+            app.state = 'installed';
+            app.percent = 0;
+          }
+          render();
+        }
         if (ev.state === 'done' || ev.state === 'error') refresh();
       });
     }

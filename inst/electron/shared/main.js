@@ -1117,7 +1117,7 @@ function createWindow() {
       try {
         sendStore({ state: 'installing', statusText: 'working...' });
         await storeJob();
-        sendStore({ state: 'done' });
+        sendStore({ state: 'done', op: actionType });
       } catch (e) {
         sendStore({ state: 'error', error: (e && e.message) || String(e) });
       }
