@@ -1110,9 +1110,10 @@ function createWindow() {
       if (!appStore) return;
       var storeId = action.appId;
       var sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
+      var storeProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase }); };
       var storeJob = actionType === 'install_app'
-        ? function () { return appStore.install(storeId, function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.phase }); }); }
-        : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId); };
+        ? function () { return appStore.install(storeId, storeProg); }
+        : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId, storeProg); };
       try {
         sendStore({ state: 'installing', statusText: 'working...' });
         await storeJob();

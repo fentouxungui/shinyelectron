@@ -4,14 +4,9 @@
  * Zero npm dependencies (Node built-in zlib for zip extraction).
  *
  * Robust bundle download: progress + idle timeout + resume (HTTP Range)
- * + retry + size/checksum verification.
+ * + retry + size/checksum verification. update() forwards install progress.
  *
- * Layout under <userData>:
- *   state.json            install state (see state.schema.json)
- *   apps/<id>/<version>/  unpacked bundle (app/ + rlib/ + manifest.json)
- *   lib/<Pkg>/            shared R library (ref-counted)
- *   private/<id>/<Pkg>/   per-app library used on version conflict
- *   store-cache/          downloaded bundles (distinct from Electron's Cache/)
+ * Layout under <userData>: state.json, apps/, lib/, private/, store-cache/
  */
 
 const fs = require('fs');
@@ -46,10 +41,6 @@ async function downloadToString(url) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/**
- * Download url -> dest with resume/retry and byte progress.
- * opts: { onProgress(frac, received, total), expectedSize, idleMs, attempts, log }
- */
 async function downloadToFile(url, dest, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
   const expectedSize = opts.expectedSize || 0;
@@ -59,14 +50,13 @@ async function downloadToFile(url, dest, opts = {}) {
   const part = dest + '.part';
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   let lastErr = null;
-
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let start = 0;
     try { start = fs.statSync(part).size; } catch (e) { start = 0; }
     try {
       const res = await httpGet(url, start > 0 ? { Range: `bytes=${start}-` } : {});
-      let status = res.statusCode;
-      if (start > 0 && status === 200) start = 0; // server ignored Range
+      const status = res.statusCode;
+      if (start > 0 && status === 200) start = 0;
       if (status !== 200 && status !== 206) { res.resume(); throw new Error('HTTP ' + status + ' for ' + url); }
       const len = Number(res.headers['content-length'] || 0);
       const total = (status === 206 ? start : 0) + len;
@@ -86,7 +76,6 @@ async function downloadToFile(url, dest, opts = {}) {
         res.on('error', reject);
       });
       clearTimeout(idle);
-
       const size = fs.statSync(part).size;
       const want = total || expectedSize;
       if (want && size < want) throw new Error('incomplete download ' + size + '/' + want);
@@ -125,7 +114,6 @@ function cmpVersion(a, b) {
   return 0;
 }
 
-/** Extract a zip with only Node built-ins. Stored/deflate, ZIP64, zip-slip safe. */
 async function unzip(zipPath, destDir) {
   const fd = fs.openSync(zipPath, 'r');
   try {
@@ -220,7 +208,6 @@ function platformKey() {
   return `linux-${a}`;
 }
 
-// ---------------------------------------------------------------- store
 function createAppStore(options) {
   const { userDataDir, catalogUrl, startBackend, log = () => {} } = options;
 
@@ -363,6 +350,7 @@ function createAppStore(options) {
     await h.stop();
   }
   async function stopAll() { await Promise.all([...running.keys()].map(stop)); }
+  function forget(id) { running.delete(id); }
 
   function checkUpdates() {
     const out = [];
@@ -372,15 +360,19 @@ function createAppStore(options) {
     }
     return out;
   }
-  async function update(id) {
+  async function update(id, onProgress = () => {}) {
     const e = catalogEntry(id);
     const app = state.apps[id];
     if (!e || !app || cmpVersion(e.version, app.version) <= 0) return;
     await stop(id);
     const oldDir = app.dir;
-    await install(id);
+    await install(id, onProgress);
     await pruneRefs(id, state.apps[id].packages);
-    await fsp.rm(oldDir, { recursive: true, force: true });
+    // Never delete the freshly installed dir (guards against manifest==catalog mismatch).
+    if (oldDir && path.resolve(oldDir) !== path.resolve(state.apps[id].dir)) {
+      await fsp.rm(oldDir, { recursive: true, force: true });
+    }
+    log(`updated ${id} -> ${state.apps[id].version}`);
   }
 
   return {
@@ -388,6 +380,7 @@ function createAppStore(options) {
     install, uninstall, run, stop, stopAll,
     checkUpdates, update,
     isRunning: (id) => running.has(id),
+    forget,
     getState: () => state,
   };
 }
