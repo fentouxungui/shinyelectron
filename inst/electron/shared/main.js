@@ -84,6 +84,43 @@ let sharedShinylivePort = null;
 let isLauncherVisible = true;   // true while the launcher page is shown (multi-app)
 let appStore = null;
 
+// Per-app metadata for Help/About and the in-app update check. Set when an app
+// is launched; reset to null on the launcher so Help/About show the shell.
+let currentAppMeta = null;
+
+// Merge the runtime sources for "what is running now": a catalog entry (name,
+// description, homepage, docs, email, author, copyright), the installed
+// manifest version, and the baked apps-manifest entry (fallbacks).
+function buildAppMeta(catalogEntry, installedVersion, manifestEntry) {
+  if (!catalogEntry && !manifestEntry) return null;
+  function pick(k) {
+    if (catalogEntry && catalogEntry[k]) return catalogEntry[k];
+    if (manifestEntry && manifestEntry[k]) return manifestEntry[k];
+    return '';
+  }
+  return {
+    id: (catalogEntry && catalogEntry.id) || (manifestEntry && manifestEntry.id) || null,
+    name: pick('name'),
+    description: pick('description'),
+    homepage: pick('homepage') || pick('homepage_url') || pick('url'),
+    docs: pick('docs') || pick('documentation') || pick('help_url'),
+    email: pick('email'),
+    author: pick('author'),
+    copyright: pick('copyright'),
+    version: installedVersion || (catalogEntry && catalogEntry.version) || (manifestEntry && manifestEntry.version) || null
+  };
+}
+
+function appMetaFor(id) {
+  var man = appsManifest && appsManifest.apps.find(function (a) { return a.id === id; });
+  var ce = null, ins = null;
+  if (appStore) {
+    try { ce = appStore.catalogEntry(id); } catch (e) {}
+    try { ins = appStore.getState().apps[id]; } catch (e) {}
+  }
+  return buildAppMeta(ce, ins && ins.version, man);
+}
+
 // Stop the persistent shinylive server. Called ONLY at quit; the launcher
 // teardown sites deliberately leave it running so the origin (and its
 // root-scoped service worker) survives app-to-app navigation.
@@ -203,36 +240,44 @@ function createTray() {
 // from an escaped *_js template variable.
 async function showAboutDialog() {
   const { dialog, shell } = require('electron');
-  const detail = [
-    'Version {{{app_version_js}}}',
-    {{#has_app_description}}'', '{{{app_description_js}}}',{{/has_app_description}}
-    {{#has_app_author}}'', 'Author: {{{app_author_js}}}',{{/has_app_author}}
-    {{#has_app_copyright}}'', '{{{app_copyright_js}}}',{{/has_app_copyright}}
-    '', 'Built with shinyelectron'
-  ].join('\n');
+  const meta = currentAppMeta || {};
+  const name = meta.name || '{{{app_name_js}}}';
+  const version = meta.version || '{{{app_version_js}}}';
+  const description = meta.description || '{{{app_description_js}}}';
+  const author = meta.author || '{{{app_author_js}}}';
+  const copyright = meta.copyright || '{{{app_copyright_js}}}';
+  const homepage = meta.homepage || '{{{app_homepage_js}}}';
+  const email = meta.email || '{{{app_email_js}}}';
+  const detailLines = ['Version ' + version];
+  if (description) detailLines.push('', description);
+  if (author) detailLines.push('', 'Author: ' + author);
+  if (copyright) detailLines.push('', copyright);
+  detailLines.push('', 'Built with shinyelectron');
+  const detail = detailLines.join('\n');
   // buttons[i] runs actions[i]; OK only closes the dialog.
   const buttons = ['OK'];
   const actions = [null];
   {{#updates_enabled}}
-  // A macOS build ships only a dmg, and electron-updater can update a Mac
-  // app only from a zip, so the check is offered on Windows and Linux.
-  if (process.platform !== 'darwin') {
+  // The shell's own check is offered on Windows/Linux (a Mac build ships only
+  // a dmg, which electron-updater cannot update); while a catalog app runs it
+  // targets that app instead, so it is offered on every platform.
+  if (process.platform !== 'darwin' || currentAppMeta) {
     buttons.push('Check for Updates');
     actions.push(checkForUpdatesInteractive);
   }
   {{/updates_enabled}}
-  {{#has_app_homepage}}
-  buttons.push('Visit Website');
-  actions.push(() => shell.openExternal('{{{app_homepage_js}}}'));
-  {{/has_app_homepage}}
-  {{#has_app_email}}
-  buttons.push('Email');
-  actions.push(() => shell.openExternal('mailto:{{{app_email_js}}}'));
-  {{/has_app_email}}
+  if (homepage) {
+    buttons.push('Visit Website');
+    actions.push(() => shell.openExternal(homepage));
+  }
+  if (email) {
+    buttons.push('Email');
+    actions.push(() => shell.openExternal('mailto:' + email));
+  }
   const { response } = await dialog.showMessageBox(mainWindow, {
     type: 'info',
-    title: 'About {{{app_name_js}}}',
-    message: '{{{app_name_js}}}',
+    title: 'About ' + name,
+    message: name,
     detail,
     buttons,
     defaultId: 0,
@@ -260,6 +305,7 @@ async function showAboutDialog() {
       detail: 'Any unsaved analysis in "' + curName + '" will be lost.'
     }).then(function(res) {
       if (res.response !== 0) return;
+      currentAppMeta = null;
       if (currentBackend && currentBackend !== sharedShinyliveServer) {
         var b = currentBackend;
         currentBackend = null;            // prevent a double stop on a later action
@@ -282,17 +328,20 @@ async function showAboutDialog() {
 
 function createMenu() {
   const isMac = process.platform === 'darwin';
+  // Multi-app: Help/About and the App menu reflect the running app.
+  const meta = currentAppMeta;
+  const appTitle = (meta && meta.name) || '{{{app_name_js}}}';
 
   {{#menu_minimal}}
   // Minimal menu -- File, Edit, Help only
   const template = [
     ...(isMac ? [{
       // Electron would label these items with app.name, which is the slug.
-      label: '{{{app_name_js}}}',
+      label: appTitle,
       submenu: [
-        { role: 'about', label: 'About {{{app_name_js}}}' },
+        { label: 'About ' + appTitle, click: () => { showAboutDialog().catch((err) => log('error', 'About dialog failed:', err)); } },
         { type: 'separator' },
-        { role: 'quit', label: 'Quit {{{app_name_js}}}' }
+        { role: 'quit', label: 'Quit ' + appTitle }
       ]
     }] : []),
     {
@@ -325,6 +374,18 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
+        {{#is_multi_app}}
+        {
+          label: 'Documentation',
+          enabled: !!((meta && meta.docs) || '{{{help_url_js}}}'),
+          click: async () => {
+            const { shell } = require('electron');
+            const url = (currentAppMeta && currentAppMeta.docs) || '{{{help_url_js}}}';
+            if (url) await shell.openExternal(url);
+          }
+        },
+        {{/is_multi_app}}
+        {{^is_multi_app}}
         {{#has_help_url}}
         {
           label: 'Documentation',
@@ -334,6 +395,7 @@ function createMenu() {
           }
         },
         {{/has_help_url}}
+        {{/is_multi_app}}
         {
           label: 'View Logs',
           click: () => {
@@ -357,17 +419,17 @@ function createMenu() {
   const template = [
     ...(isMac ? [{
       // Electron would label these items with app.name, which is the slug.
-      label: '{{{app_name_js}}}',
+      label: appTitle,
       submenu: [
-        { role: 'about', label: 'About {{{app_name_js}}}' },
+        { label: 'About ' + appTitle, click: () => { showAboutDialog().catch((err) => log('error', 'About dialog failed:', err)); } },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
-        { role: 'hide', label: 'Hide {{{app_name_js}}}' },
+        { role: 'hide', label: 'Hide ' + appTitle },
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { role: 'quit', label: 'Quit {{{app_name_js}}}' }
+        { role: 'quit', label: 'Quit ' + appTitle }
       ]
     }] : []),
     {
@@ -432,6 +494,18 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
+        {{#is_multi_app}}
+        {
+          label: 'Documentation',
+          enabled: !!((meta && meta.docs) || '{{{help_url_js}}}'),
+          click: async () => {
+            const { shell } = require('electron');
+            const url = (currentAppMeta && currentAppMeta.docs) || '{{{help_url_js}}}';
+            if (url) await shell.openExternal(url);
+          }
+        },
+        {{/is_multi_app}}
+        {{^is_multi_app}}
         {{#has_help_url}}
         {
           label: 'Documentation',
@@ -441,6 +515,7 @@ function createMenu() {
           }
         },
         {{/has_help_url}}
+        {{/is_multi_app}}
         {
           label: 'View Logs',
           click: () => {
@@ -602,6 +677,12 @@ function setupAutoUpdater() {
 // every outcome with a dialog.
 async function checkForUpdatesInteractive() {
   const { dialog } = require('electron');
+  // Multi-app: while a catalog app runs, Check for Updates targets that app
+  // (same source of truth as the launcher's Update button); on the launcher
+  // it keeps checking the shell itself via electron-updater.
+  if (currentAppMeta && appStore) {
+    return checkAppUpdateInteractive();
+  }
   const show = (type, message, detail) =>
     dialog.showMessageBox(mainWindow, { type, title: 'Check for Updates', message, detail, noLink: true })
       .catch((err) => updaterLog.error('Update dialog failed:', err));
@@ -653,6 +734,66 @@ async function checkForUpdatesInteractive() {
   if (response === 0) {
     // The update-downloaded handler asks to restart once the download completes.
     autoUpdater.downloadUpdate().catch(downloadFailed);
+  }
+}
+
+// App-scoped update check for Help > About while a catalog app is running. It
+// reuses the store's install/update pipeline, so progress and failures surface
+// on the launcher card (store-status), consistent with the Update button.
+async function checkAppUpdateInteractive() {
+  const { dialog } = require('electron');
+  const id = (currentAppMeta && currentAppMeta.id) || lastSelectedAppId;
+  const name = (currentAppMeta && currentAppMeta.name) || id || 'this app';
+  const show = (type, message, detail) =>
+    dialog.showMessageBox(mainWindow, { type, title: 'Check for Updates', message, detail, noLink: true })
+      .catch((err) => log('error', 'Update dialog failed:', err));
+  try {
+    await appStore.fetchCatalog();
+  } catch (err) {
+    return show('warning', 'Could not check for updates', String((err && err.message) || err));
+  }
+  const entry = appStore.catalogEntry(id);
+  const st = appStore.getState();
+  const installed = st.apps[id] && st.apps[id].version;
+  if (!entry || !installed) {
+    return show('info', 'No update information',
+      name + ' was not installed from the catalog, so it has no update channel.');
+  }
+  if (cmpVersion(entry.version, installed) <= 0) {
+    return show('info', 'You are up to date', name + ' ' + installed + ' is the latest version.');
+  }
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'Check for Updates',
+    message: 'Version ' + entry.version + ' is available',
+    detail: 'You have ' + name + ' ' + installed + '. Updating returns to the launcher and may discard unsaved work.',
+    buttons: ['Update', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  });
+  if (response !== 0) return;
+
+  // Stop the running app and return to the launcher, then update; the launcher
+  // card shows progress and any failure via store-status.
+  if (currentBackend && currentBackend !== sharedShinyliveServer) {
+    const b = currentBackend;
+    currentBackend = null;
+    try { b.removeAllListeners(); await b.stop(); } catch (e) { /* best effort */ }
+  } else {
+    currentBackend = null;
+  }
+  currentAppMeta = null;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+
+  const sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: id }, ev)); };
+  const onProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
+  try {
+    sendStore({ state: 'installing', statusText: 'working...' });
+    await appStore.update(id, onProg);
+    sendStore({ state: 'done', op: 'update_app' });
+  } catch (err) {
+    sendStore({ state: 'error', error: (err && err.message) || String(err), step: (err && err.step) || '' });
   }
 }
 {{/updates_enabled}}
@@ -918,6 +1059,11 @@ function createWindow() {
   function startSelectedApp(appId) {
     var selectedApp = appsManifest && appsManifest.apps.find(function(a) { return a.id === appId; });
     if (!selectedApp) return;
+    lastSelectedAppId = appId;
+    currentAppMeta = appMetaFor(appId);
+    {{#menu_enabled}}
+    createMenu();
+    {{/menu_enabled}}
 
     // Derive the serve descriptor defensively so an absent/older apps-manifest
     // (no `serve`) degrades to native dispatch instead of throwing. The per-app
@@ -1133,6 +1279,12 @@ function createWindow() {
 
     } else if (actionType === 'run_app') {
       if (!appStore) return;
+      lastSelectedAppId = action.appId;
+      try { await appStore.fetchCatalog(); } catch (e) { /* entry may already be cached */ }
+      currentAppMeta = appMetaFor(action.appId);
+      {{#menu_enabled}}
+      createMenu();
+      {{/menu_enabled}}
       try { await appStore.run(action.appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: action.appId, state: 'done' });
 
