@@ -11,7 +11,7 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const backend = require('./backends/{{backend_module}}');
@@ -815,6 +815,7 @@ function createWindow() {
         const ins = st.apps[a.id];
         return {
           id: a.id, name: a.name, description: a.description, icon: a.icon,
+          homepage: a.homepage || a.homepage_url || a.url || '',
           catalogVersion: a.version,
           installed: !!ins, installedVersion: ins ? ins.version : null,
           updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0,
@@ -824,6 +825,14 @@ function createWindow() {
       });
     });
   }
+
+  ipcMain.handle('open-external', async (_event, url) => {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      await shell.openExternal(url);
+      return true;
+    }
+    return false;
+  });
 
   // Multi-app: load launcher instead of starting backend immediately
   if (appsManifest) {
@@ -1110,7 +1119,7 @@ function createWindow() {
       if (!appStore) return;
       var storeId = action.appId;
       var sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
-      var storeProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase }); };
+      var storeProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
       var storeJob = actionType === 'install_app'
         ? function () { return appStore.install(storeId, storeProg); }
         : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId, storeProg); };
@@ -1119,7 +1128,7 @@ function createWindow() {
         await storeJob();
         sendStore({ state: 'done', op: actionType });
       } catch (e) {
-        sendStore({ state: 'error', error: (e && e.message) || String(e) });
+        sendStore({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
       }
 
     } else if (actionType === 'run_app') {

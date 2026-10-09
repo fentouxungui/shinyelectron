@@ -42,6 +42,13 @@
     .app-icon.plain { background: transparent; }
     .app-icon img { width: 100%; height: 100%; object-fit: contain; }
     .app-name { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+    .app-name.link { color: {{brand_primary}}; cursor: pointer; position: relative; align-self: flex-start; }
+    .app-name.link:hover { text-decoration: underline; }
+    .app-name.link[data-tip]:hover::after {
+      content: attr(data-tip); position: absolute; left: 0; top: 100%; margin-top: 4px; z-index: 10;
+      background: #1e293b; color: #fff; font-size: 11px; font-weight: 400; text-decoration: none;
+      padding: 3px 7px; border-radius: 5px; white-space: nowrap; opacity: .96;
+    }
     .app-desc { font-size: 13px; color: #64748b; line-height: 1.4; }
     .badge {
       display: inline-block; font-size: 10px; color: #64748b; background: #f1f5f9;
@@ -71,6 +78,18 @@
   <script>
     var model = [];
     var byId = {};
+    var errors = {};
+
+    var STEP_LABELS = {
+      resolve: 'Resolving bundle',
+      download: 'Downloading',
+      verifying: 'Verifying download',
+      unpacking: 'Installing (unpacking)',
+      linking: 'Installing (linking packages)'
+    };
+    function stepLabel(step, fallback) {
+      return STEP_LABELS[step] || fallback || 'Installing\u2026';
+    }
 
     function makeButton(label, cls, onClick, disabled) {
       var b = document.createElement('button');
@@ -111,6 +130,15 @@
         var name = document.createElement('div');
         name.className = 'app-name';
         name.textContent = app.name || app.id;
+        if (app.homepage) {
+          name.className = 'app-name link';
+          name.setAttribute('data-tip', 'click to learn more');
+          name.title = 'click to learn more';
+          name.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            if (window.lifecycle && window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage);
+          });
+        }
         card.appendChild(name);
 
         if (app.description) {
@@ -136,12 +164,14 @@
           card.appendChild(prog);
           var st = document.createElement('div');
           st.className = 'status';
-          st.textContent = app.statusText || 'Installing\u2026';
+          st.textContent = stepLabel(app.step, app.statusText);
           card.appendChild(st);
-        } else if (app.state === 'error') {
+        }
+        var err = errors[app.id];
+        if (err) {
           var se = document.createElement('div');
           se.className = 'status error';
-          se.textContent = 'Error: ' + (app.error || 'failed');
+          se.textContent = 'Install failed at step "' + (err.step || 'unknown') + '": ' + err.message;
           card.appendChild(se);
         }
 
@@ -191,10 +221,15 @@
     if (window.lifecycle && window.lifecycle.onStoreStatus) {
       window.lifecycle.onStoreStatus(function (ev) {
         var app = byId[ev.id];
+        // Track/clear the per-app failure so the message survives refresh().
+        if (ev.state === 'installing') delete errors[ev.id];
+        if (ev.state === 'done') delete errors[ev.id];
+        if (ev.state === 'error') errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed' };
         if (app) {
           if (ev.state) app.state = ev.state;
           if (typeof ev.percent === 'number') app.percent = ev.percent;
           if (ev.statusText) app.statusText = ev.statusText;
+          if (ev.step) app.step = ev.step;
           if (ev.error) app.error = ev.error;
           if (ev.installed !== undefined) app.installed = ev.installed;
           if (ev.installedVersion !== undefined) app.installedVersion = ev.installedVersion;

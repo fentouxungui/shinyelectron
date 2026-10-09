@@ -23,5 +23,6 @@ contextBridge.exposeInMainWorld('lifecycle', {
   uninstallApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'uninstall_app', appId }),
   updateApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'update_app', appId }),
   runApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'run_app', appId }),
-  stopApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'stop_app', appId })
+  stopApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'stop_app', appId }),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url)
 });

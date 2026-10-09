@@ -239,55 +239,74 @@ function createAppStore(options) {
 
   async function install(id, onProgress = () => {}) {
     const entry = catalogEntry(id);
-    if (!entry) throw new Error(`unknown app: ${id}`);
+    if (!entry) { const e = new Error(`unknown app: ${id}`); e.step = 'resolve'; throw e; }
     const plat = platformKey();
     const art = entry.artifacts && entry.artifacts[plat];
-    if (!art) throw new Error(`no bundle for ${plat} of ${id}`);
+    if (!art) { const e = new Error(`no bundle for ${plat} of ${id}`); e.step = 'resolve'; throw e; }
 
     const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
-    log(`install ${id}@${entry.version} ${plat}: GET ${art.url} (${art.size || '?'} bytes)`);
-    onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' });
-    await downloadToFile(art.url, zip, {
-      expectedSize: art.size || 0,
-      log,
-      onProgress: (frac, got, total) => onProgress({
-        phase: 'downloading',
-        percent: Math.round((frac || 0) * 100),
-        statusText: 'downloading ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
-      }),
-    });
-    log(`downloaded ${zip} (${fs.statSync(zip).size} bytes)`);
+    let step = 'download';
+    try {
+      log(`install ${id}@${entry.version} ${plat}: GET ${art.url} (${art.size || '?'} bytes)`);
+      onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' });
+      await downloadToFile(art.url, zip, {
+        expectedSize: art.size || 0,
+        log,
+        onProgress: (frac, got, total) => onProgress({
+          phase: 'downloading',
+          percent: Math.round((frac || 0) * 100),
+          statusText: 'downloading ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
+        }),
+      });
+      log(`downloaded ${zip} (${fs.statSync(zip).size} bytes)`);
 
-    onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying' });
-    const got = await sha256File(zip);
-    if (art.sha256 && got !== art.sha256) {
-      await fsp.rm(zip, { force: true });
-      throw new Error(`checksum mismatch for ${id}`);
+      // Verify against the catalog BEFORE touching anything on disk.
+      step = 'verify';
+      const gotSize = fs.statSync(zip).size;
+      onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying size' });
+      if (art.size && gotSize !== art.size) {
+        await fsp.rm(zip, { force: true });
+        const e = new Error(`size mismatch (catalog ${art.size} bytes, downloaded ${gotSize} bytes)`);
+        e.step = 'verify'; e.code = 'SIZE_MISMATCH';
+        throw e;
+      }
+      onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying checksum' });
+      const got = await sha256File(zip);
+      if (art.sha256 && got !== art.sha256) {
+        await fsp.rm(zip, { force: true });
+        const e = new Error(`checksum mismatch (catalog ${String(art.sha256).slice(0, 12)}\u2026, downloaded ${got.slice(0, 12)}\u2026)`);
+        e.step = 'verify'; e.code = 'CHECKSUM_MISMATCH';
+        throw e;
+      }
+
+      step = 'install';
+      onProgress({ phase: 'unpacking', percent: 100, statusText: 'unpacking' });
+      const staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
+      await fsp.rm(staging, { recursive: true, force: true });
+      await unzip(zip, staging);
+
+      const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
+      if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
+      const finalDir = path.join(appsDir, id, manifest.version);
+      await fsp.mkdir(path.dirname(finalDir), { recursive: true });
+      await fsp.rm(finalDir, { recursive: true, force: true });
+      await fsp.rename(staging, finalDir);
+
+      onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
+      await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+
+      state.apps[id] = {
+        version: manifest.version, platform: plat, dir: finalDir,
+        packages: (manifest.packages || []).map((p) => p.name),
+      };
+      saveState();
+      log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
+      onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
+      return { id, version: manifest.version };
+    } catch (e) {
+      if (e && !e.step) e.step = step;
+      throw e;
     }
-
-    onProgress({ phase: 'unpacking', percent: 100, statusText: 'unpacking' });
-    const staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
-    await fsp.rm(staging, { recursive: true, force: true });
-    await unzip(zip, staging);
-
-    const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
-    if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
-    const finalDir = path.join(appsDir, id, manifest.version);
-    await fsp.mkdir(path.dirname(finalDir), { recursive: true });
-    await fsp.rm(finalDir, { recursive: true, force: true });
-    await fsp.rename(staging, finalDir);
-
-    onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-    await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
-
-    state.apps[id] = {
-      version: manifest.version, platform: plat, dir: finalDir,
-      packages: (manifest.packages || []).map((p) => p.name),
-    };
-    saveState();
-    log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
-    onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
-    return { id, version: manifest.version };
   }
 
   async function reconcilePackages(appId, appDir, packages, onProgress = () => {}) {
