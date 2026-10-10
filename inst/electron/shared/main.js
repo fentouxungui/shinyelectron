@@ -950,7 +950,8 @@ function createWindow() {
       log: function (m) { log('info', '[store]', m); }
     });
     ipcMain.handle('store-list', async () => {
-      const cat = await appStore.fetchCatalog();
+      // Force a fresh catalog so a newly registered app appears without restarting.
+      const cat = await appStore.fetchCatalog({ force: true });
       const st = appStore.getState();
       return cat.apps.map((a) => {
         const ins = st.apps[a.id];

@@ -220,6 +220,8 @@ function createAppStore(options) {
 
   let state = loadState();
   let catalog = null;
+  let catalogFetchedAt = 0;
+  const CATALOG_TTL_MS = 60000;
   const running = new Map();
 
   function loadState() {
@@ -229,9 +231,14 @@ function createAppStore(options) {
   function saveState() { fs.writeFileSync(statePath, JSON.stringify(state, null, 2)); }
 
   async function fetchCatalog({ force = false } = {}) {
-    if (catalog && !force) return catalog;
-    log('fetch catalog ' + catalogUrl);
-    catalog = JSON.parse(await downloadToString(catalogUrl));
+    const now = Date.now();
+    if (catalog && !force && (now - catalogFetchedAt) < CATALOG_TTL_MS) return catalog;
+    // Cache-bust: gh-pages serves catalog.json with Cache-Control max-age=600,
+    // so a bare URL can return a stale copy for up to 10 minutes.
+    const url = catalogUrl + (catalogUrl.includes('?') ? '&' : '?') + 't=' + now;
+    log('fetch catalog ' + url);
+    catalog = JSON.parse(await downloadToString(url));
+    catalogFetchedAt = now;
     log('catalog apps: ' + catalog.apps.map((a) => a.id).join(', '));
     return catalog;
   }
