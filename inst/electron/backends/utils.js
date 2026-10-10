@@ -18,7 +18,7 @@ function logDebug(...args) {
 
 // Default for lifecycle.startup_timeout. Keep in sync with
 // SHINYELECTRON_DEFAULTS$lifecycle$startup_timeout in R/constants.R.
-const DEFAULT_STARTUP_TIMEOUT_MS = 180000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 900000;
 
 /**
  * How long a backend waits for its server to answer before reporting a

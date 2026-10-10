@@ -889,7 +889,7 @@ nodejs:
 # lifecycle:
 #   show_phase_details: true
 #   error_show_logs: true
-#   startup_timeout: 180000       # ms to wait for the R, Python, or container server to start
+#   startup_timeout: 900000       # ms to wait for the R, Python, or container server to start
 #   shutdown_timeout: 10000       # ms to wait for the server to stop when quitting
 #   custom_splash_html: null
 #   custom_error_html: null
