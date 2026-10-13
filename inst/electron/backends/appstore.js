@@ -15,6 +15,7 @@ const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const { Worker } = require('worker_threads');
 
 const REDIRECT = [301, 302, 303, 307, 308];
 
@@ -114,90 +115,53 @@ function cmpVersion(a, b) {
   return 0;
 }
 
-async function unzip(zipPath, destDir) {
-  const fd = fs.openSync(zipPath, 'r');
-  try {
-    const size = fs.fstatSync(fd).size;
-    const readAt = (pos, len) => {
-      const b = Buffer.allocUnsafe(len);
-      let got = 0;
-      while (got < len) {
-        const n = fs.readSync(fd, b, got, len - got, pos + got);
-        if (n <= 0) break;
-        got += n;
-      }
-      return b.subarray(0, got);
+// Extract a zip on a worker thread so a large bundle never blocks the main
+// (UI) process. Progress is reported as uncompressed bytes processed.
+function unzip(zipPath, destDir, onProgress = () => {}) {
+  return new Promise((resolve, reject) => {
+    let workerPath = path.join(__dirname, 'unzip-worker.js');
+    // backends/ is asarUnpack-ed, so point the worker at the real file.
+    workerPath = workerPath.replace('app.asar', 'app.asar.unpacked');
+    let worker;
+    try {
+      worker = new Worker(workerPath, { workerData: { zipPath, destDir } });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      try { worker.terminate(); } catch (e) { /* best effort */ }
+      if (err) reject(err); else resolve();
     };
-    const tailLen = Math.min(size, 65557);
-    const tail = readAt(size - tailLen, tailLen);
-    let eocd = -1;
-    for (let i = tail.length - 22; i >= 0; i--) {
-      if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-    }
-    if (eocd < 0) throw new Error('not a zip (no EOCD found)');
-    let entries = tail.readUInt16LE(eocd + 10);
-    let cdSize = tail.readUInt32LE(eocd + 12);
-    let cdOffset = tail.readUInt32LE(eocd + 16);
-    if (entries === 0xffff || cdOffset === 0xffffffff || cdSize === 0xffffffff) {
-      const locPos = (size - tailLen) + eocd - 20;
-      if (locPos >= 0) {
-        const loc = readAt(locPos, 20);
-        if (loc.readUInt32LE(0) === 0x07064b50) {
-          const z64 = readAt(Number(loc.readBigUInt64LE(8)), 56);
-          if (z64.readUInt32LE(0) === 0x06064b50) {
-            entries = Number(z64.readBigUInt64LE(32));
-            cdSize = Number(z64.readBigUInt64LE(40));
-            cdOffset = Number(z64.readBigUInt64LE(48));
-          }
-        }
+    worker.on('message', (msg) => {
+      if (!msg) return;
+      if (msg.type === 'progress') {
+        onProgress({
+          phase: 'unpacking',
+          percent: msg.percent,
+          statusText: 'Unpacking ' + msg.processed + ' / ' + msg.total + ' files',
+        });
+      } else if (msg.type === 'done') {
+        finish(null);
+      } else if (msg.type === 'error') {
+        finish(new Error(msg.message || 'unpack failed'));
       }
-    }
-    const cd = readAt(cdOffset, cdSize);
-    const root = path.resolve(destDir);
-    await fsp.mkdir(root, { recursive: true });
-    let p = 0;
-    for (let i = 0; i < entries; i++) {
-      if (cd.readUInt32LE(p) !== 0x02014b50) throw new Error('bad central directory record');
-      const method = cd.readUInt16LE(p + 10);
-      let compSize = cd.readUInt32LE(p + 20);
-      let uncompSize = cd.readUInt32LE(p + 24);
-      const nameLen = cd.readUInt16LE(p + 28);
-      const extraLen = cd.readUInt16LE(p + 30);
-      const commentLen = cd.readUInt16LE(p + 32);
-      let lho = cd.readUInt32LE(p + 42);
-      const name = cd.subarray(p + 46, p + 46 + nameLen).toString('utf8');
-      if (compSize === 0xffffffff || uncompSize === 0xffffffff || lho === 0xffffffff) {
-        let e = p + 46 + nameLen;
-        const end = e + extraLen;
-        while (e + 4 <= end) {
-          const id = cd.readUInt16LE(e);
-          const sz = cd.readUInt16LE(e + 2);
-          if (id === 0x0001) {
-            let q = e + 4;
-            if (uncompSize === 0xffffffff) { uncompSize = Number(cd.readBigUInt64LE(q)); q += 8; }
-            if (compSize === 0xffffffff) { compSize = Number(cd.readBigUInt64LE(q)); q += 8; }
-            if (lho === 0xffffffff) { lho = Number(cd.readBigUInt64LE(q)); q += 8; }
-            break;
-          }
-          e += 4 + sz;
-        }
-      }
-      p += 46 + nameLen + extraLen + commentLen;
-      void uncompSize;
-      const target = path.resolve(root, name);
-      if (target !== root && !target.startsWith(root + path.sep)) throw new Error('zip-slip entry rejected: ' + name);
-      if (name.endsWith('/')) { await fsp.mkdir(target, { recursive: true }); continue; }
-      const lh = readAt(lho, 30);
-      if (lh.readUInt32LE(0) !== 0x04034b50) throw new Error('bad local file header');
-      const dataPos = lho + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
-      const comp = readAt(dataPos, compSize);
-      const data = method === 0 ? comp : method === 8 ? zlib.inflateRawSync(comp)
-        : (() => { throw new Error('unsupported zip compression method ' + method); })();
-      await fsp.mkdir(path.dirname(target), { recursive: true });
-      await fsp.writeFile(target, data);
-    }
-  } finally {
-    fs.closeSync(fd);
+    });
+    worker.on('error', (err) => finish(err));
+    worker.on('exit', (code) => { if (code !== 0) finish(new Error('unpack worker exited with code ' + code)); else finish(null); });
+  });
+}
+
+// Free bytes on the volume holding dir, or null when unsupported.
+async function freeBytes(dir) {
+  try {
+    const st = await fsp.statfs(dir);
+    return st.bavail * st.bsize;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -253,6 +217,15 @@ function createAppStore(options) {
 
     const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
     let step = 'download';
+    // Need room for the archive plus its unpacked contents (small margin).
+    const free = await freeBytes(cacheDir);
+    const need = (art.size || 0) * 3;
+    if (free != null && art.size && free < need) {
+      const e = new Error(`not enough disk space (need ~${Math.ceil(need / 1048576)} MB free, have ${Math.floor(free / 1048576)} MB)`);
+      e.step = 'download';
+      e.code = 'NO_SPACE';
+      throw e;
+    }
     try {
       log(`install ${id}@${entry.version} ${plat}: GET ${art.url} (${art.size || '?'} bytes)`);
       onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' });
@@ -287,10 +260,10 @@ function createAppStore(options) {
       }
 
       step = 'install';
-      onProgress({ phase: 'unpacking', percent: 100, statusText: 'unpacking' });
+      onProgress({ phase: 'unpacking', percent: 0, statusText: 'unpacking' });
       const staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
       await fsp.rm(staging, { recursive: true, force: true });
-      await unzip(zip, staging);
+      await unzip(zip, staging, onProgress);
 
       const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
       if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
@@ -309,6 +282,8 @@ function createAppStore(options) {
       saveState();
       log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
       onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
+      // The cached archive has served its purpose; reclaim the disk.
+      await fsp.rm(zip, { force: true }).catch(() => {});
       return { id, version: manifest.version };
     } catch (e) {
       if (e && !e.step) e.step = step;

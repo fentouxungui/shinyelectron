@@ -431,7 +431,7 @@
         container.appendChild(prog);
         var st = document.createElement('div');
         st.className = 'status';
-        st.textContent = stepLabel(app.step, app.statusText);
+        st.textContent = (app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText);
         container.appendChild(st);
       }
       var err = errors[app.id];
