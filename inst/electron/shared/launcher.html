@@ -36,6 +36,12 @@
     }
     .tab.active { background: {{brand_primary}}; border-color: {{brand_primary}}; color: #fff; }
     .tab .count { opacity: .75; margin-left: 2px; }
+    /* View switch: card grid vs compact list (shown on both pages) */
+    .viewbar { max-width: 960px; margin: 0 auto 12px; display: flex; justify-content: flex-end; }
+    .segmented { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; }
+    .segmented button { font: inherit; font-size: 12px; padding: 5px 11px; border: none; background: #fff; color: #1e293b; cursor: pointer; }
+    .segmented button + button { border-left: 1px solid #cbd5e1; }
+    .segmented button.active { background: {{brand_primary}}; color: #fff; }
     .apps-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -58,6 +64,7 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 28px; font-weight: 700; color: white; margin-bottom: 16px;
     }
+    .app-icon.sm { width: 40px; height: 40px; font-size: 18px; border-radius: 10px; }
     /* When a real image icon is shown, drop the colored background. */
     .app-icon.plain { background: transparent; }
     .app-icon img { width: 100%; height: 100%; object-fit: contain; }
@@ -85,6 +92,17 @@
     }
     .btn.primary { background: {{brand_primary}}; border-color: {{brand_primary}}; color: #fff; }
     .btn:disabled { opacity: .5; cursor: default; }
+    /* Compact list layout */
+    .apps-grid.list-view { display: flex; flex-direction: column; gap: 10px; }
+    .app-row {
+      background: #fff; border-radius: 12px; padding: 12px 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; align-items: center; gap: 14px;
+    }
+    .app-row .app-icon.sm { margin-bottom: 0; flex: 0 0 auto; }
+    .app-row-main { flex: 1 1 auto; min-width: 0; }
+    .app-row-main .app-name { margin-bottom: 2px; }
+    .app-row-main .badge { margin-top: 6px; }
+    .app-row .card-actions { margin: 0; padding: 0; flex: 0 0 auto; }
     .empty { max-width: 960px; margin: 48px auto 0; text-align: center; color: #64748b; font-size: 14px; }
     .empty .btn { margin-top: 14px; }
   </style>
@@ -110,6 +128,13 @@
     </div>
   </div>
 
+  <div class="viewbar">
+    <div class="segmented" id="layout-toggle">
+      <button type="button" data-layout="card" title="Card view">Cards</button>
+      <button type="button" data-layout="list" title="List view">List</button>
+    </div>
+  </div>
+
   <div class="apps-grid" id="apps-grid"></div>
   <div class="empty" id="empty-state" hidden></div>
 
@@ -120,6 +145,11 @@
     var view = 'launcher';   // 'launcher' | 'manager'
     var tab = 'installed';   // 'installed' | 'all' | 'updates'
     var query = '';
+    var layout = 'card';     // 'card' | 'list'
+    try {
+      var savedLayout = localStorage.getItem('shinyapps.layout');
+      if (savedLayout === 'card' || savedLayout === 'list') layout = savedLayout;
+    } catch (e) {}
 
     var STEP_LABELS = {
       resolve: 'Resolving bundle',
@@ -192,21 +222,26 @@
       }
     }
 
-    function buildCard(app) {
-      var card = document.createElement('div');
-      card.className = 'app-card';
+    function updateLayoutToggle() {
+      var btns = document.querySelectorAll('#layout-toggle button');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].getAttribute('data-layout') === layout) btns[i].classList.add('active');
+        else btns[i].classList.remove('active');
+      }
+    }
 
+    function makeIcon(app, small) {
       var icon = document.createElement('div');
-      icon.className = 'app-icon';
+      icon.className = 'app-icon' + (small ? ' sm' : '');
       var initial = (app.name || '?').charAt(0).toUpperCase();
       if (app.icon && typeof app.icon === 'string' && app.icon.length) {
-        // Real image: no colored background; fill the 64px tile.
-        icon.className = 'app-icon plain';
+        // Real image: no colored background; fill the tile.
+        icon.className = 'app-icon plain' + (small ? ' sm' : '');
         var img = document.createElement('img');
         img.alt = '';
         img.onerror = function () {
           try { icon.removeChild(img); } catch (e) {}
-          icon.className = 'app-icon';
+          icon.className = 'app-icon' + (small ? ' sm' : '');
           icon.textContent = initial;
         };
         img.src = app.icon;
@@ -214,8 +249,10 @@
       } else {
         icon.textContent = initial;
       }
-      card.appendChild(icon);
+      return icon;
+    }
 
+    function makeName(app) {
       var name = document.createElement('div');
       name.className = 'app-name';
       name.textContent = app.name || app.id;
@@ -228,15 +265,10 @@
           if (window.lifecycle && window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage);
         });
       }
-      card.appendChild(name);
+      return name;
+    }
 
-      if (app.description) {
-        var desc = document.createElement('div');
-        desc.className = 'app-desc';
-        desc.textContent = app.description;
-        card.appendChild(desc);
-      }
-
+    function makeBadge(app) {
       var badge = document.createElement('div');
       badge.className = 'badge';
       if (app.installed) {
@@ -248,28 +280,32 @@
       } else {
         badge.textContent = 'v' + (app.catalogVersion || '?') + '  \u00b7  not installed';
       }
-      card.appendChild(badge);
+      return badge;
+    }
 
+    function appendStatus(container, app) {
       if (app.state === 'installing') {
         var prog = document.createElement('div');
         prog.className = 'progress';
         var bar = document.createElement('i');
         bar.style.width = (app.percent || 0) + '%';
         prog.appendChild(bar);
-        card.appendChild(prog);
+        container.appendChild(prog);
         var st = document.createElement('div');
         st.className = 'status';
         st.textContent = stepLabel(app.step, app.statusText);
-        card.appendChild(st);
+        container.appendChild(st);
       }
       var err = errors[app.id];
       if (err) {
         var se = document.createElement('div');
         se.className = 'status error';
         se.textContent = 'Install failed at step "' + (err.step || 'unknown') + '": ' + err.message;
-        card.appendChild(se);
+        container.appendChild(se);
       }
+    }
 
+    function makeActions(app) {
       var actions = document.createElement('div');
       actions.className = 'card-actions';
       if (!window.lifecycle) {
@@ -295,15 +331,53 @@
           window.lifecycle.uninstallApp(app.id);
         }, app.state === 'installing'));
       }
-      card.appendChild(actions);
+      return actions;
+    }
 
+    function buildCard(app) {
+      var card = document.createElement('div');
+      card.className = 'app-card';
+      card.appendChild(makeIcon(app, false));
+      card.appendChild(makeName(app));
+      if (app.description) {
+        var desc = document.createElement('div');
+        desc.className = 'app-desc';
+        desc.textContent = app.description;
+        card.appendChild(desc);
+      }
+      card.appendChild(makeBadge(app));
+      appendStatus(card, app);
+      card.appendChild(makeActions(app));
       return card;
+    }
+
+    function buildRow(app) {
+      var row = document.createElement('div');
+      row.className = 'app-row';
+      row.appendChild(makeIcon(app, true));
+      var main = document.createElement('div');
+      main.className = 'app-row-main';
+      main.appendChild(makeName(app));
+      var subText = app.description || app.author || '';
+      if (subText) {
+        var sub = document.createElement('div');
+        sub.className = 'app-desc';
+        sub.textContent = subText;
+        main.appendChild(sub);
+      }
+      main.appendChild(makeBadge(app));
+      appendStatus(main, app);
+      row.appendChild(main);
+      row.appendChild(makeActions(app));
+      return row;
     }
 
     function render() {
       updateChrome();
-      var grid = document.getElementById('apps-grid');
-      grid.innerHTML = '';
+      updateLayoutToggle();
+      var container = document.getElementById('apps-grid');
+      container.innerHTML = '';
+      container.className = 'apps-grid' + (layout === 'list' ? ' list-view' : '');
       var list = currentList();
       var empty = document.getElementById('empty-state');
       empty.innerHTML = '';
@@ -316,7 +390,9 @@
       } else {
         empty.hidden = true;
       }
-      list.forEach(function (app) { grid.appendChild(buildCard(app)); });
+      list.forEach(function (app) {
+        container.appendChild(layout === 'list' ? buildRow(app) : buildCard(app));
+      });
     }
 
     function setView(next) {
@@ -329,6 +405,12 @@
       tab = next;
       render();
     }
+    function setLayout(next) {
+      if (next !== 'card' && next !== 'list') return;
+      layout = next;
+      try { localStorage.setItem('shinyapps.layout', layout); } catch (e) {}
+      render();
+    }
 
     document.getElementById('manage-btn').addEventListener('click', function () { setView('manager'); });
     document.getElementById('done-btn').addEventListener('click', function () { setView('launcher'); });
@@ -338,6 +420,14 @@
         (function (btn) {
           btn.addEventListener('click', function () { setTab(btn.getAttribute('data-tab')); });
         })(tabs[i]);
+      }
+    })();
+    (function () {
+      var btns = document.querySelectorAll('#layout-toggle button');
+      for (var i = 0; i < btns.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () { setLayout(btn.getAttribute('data-layout')); });
+        })(btns[i]);
       }
     })();
     document.getElementById('search').addEventListener('input', function () {
