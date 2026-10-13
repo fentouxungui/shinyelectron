@@ -15,7 +15,7 @@ const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen, shell } = 
 const path = require('path');
 const fs = require('fs');
 const backend = require('./backends/{{backend_module}}');
-const { createAppStore, cmpVersion } = require('./backends/appstore');
+const { createAppStore, cmpVersion, platformKey } = require('./backends/appstore');
 
 // File logging -- writes to configured log directory or app userData
 const LOG_LEVEL = '{{{log_level_js}}}';
@@ -83,6 +83,8 @@ let sharedShinyliveServer = null;
 let sharedShinylivePort = null;
 let isLauncherVisible = true;   // true while the launcher page is shown (multi-app)
 let appStore = null;
+// Last loaded URL per catalog app id, so a still-running app can be re-opened.
+var storeAppUrls = {};
 
 // Per-app metadata for Help/About and the in-app update check. Set when an app
 // is launched; reset to null on the launcher so Help/About show the shell.
@@ -276,7 +278,7 @@ async function showAboutDialog() {
   // a dmg, which electron-updater cannot update); while a catalog app runs it
   // targets that app instead, so it is offered on every platform.
   if (process.platform !== 'darwin' || currentAppMeta) {
-    buttons.push('Check for Updates');
+    buttons.push(currentAppMeta ? 'Check for Updates' : 'Check for ShinyApps Updates');
     actions.push(checkForUpdatesInteractive);
   }
   {{/updates_enabled}}
@@ -361,20 +363,27 @@ function buildAppsSubmenu() {
   var sub = [];
   if (isLauncherVisible) {
     var installed = installedAppMenuItems();
+    var MAX_RUN = 8;
+    var shown = installed.slice(0, MAX_RUN);
     var runItems = installed.length
-      ? installed.map(function (it) {
+      ? shown.map(function (it) {
           return { label: it.label, click: function () { runStoreApp(it.id); } };
         })
       : [{ label: 'No apps installed yet - install one first', enabled: false }];
+    if (installed.length > MAX_RUN) {
+      runItems = runItems.concat([
+        { type: 'separator' },
+        { label: 'More\u2026', click: function () { openManagerFromMenu('installed'); } }
+      ]);
+    }
     sub.push({ label: 'Quick Run', submenu: runItems });
     sub.push({ type: 'separator' });
+    var updates = 0;
+    try { updates = appStore ? appStore.checkUpdates().length : 0; } catch (e) { updates = 0; }
     sub.push({
-      label: 'Manage Apps\u2026',
-      click: function () {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('store-command', { cmd: 'open_manager' });
-        }
-      }
+      label: 'Manage Apps\u2026' + (updates ? '  (' + updates + (updates > 1 ? ' updates' : ' update') + ')' : ''),
+      accelerator: 'CmdOrCtrl+Shift+M',
+      click: function () { openManagerFromMenu(updates ? 'updates' : 'installed'); }
     });
   } else {
     sub.push({
@@ -384,6 +393,13 @@ function buildAppsSubmenu() {
     });
   }
   return sub;
+}
+
+// Open the launcher's manager on a given tab (deep link from the Apps menu).
+function openManagerFromMenu(tab) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('store-command', { cmd: 'open_manager', tab: tab || 'installed' });
+  }
 }
 
 function createMenu() {
@@ -974,6 +990,7 @@ function createWindow() {
         })
       }).then(function (result) {
         actualPort = result.port;
+        storeAppUrls[opts.appId] = 'http://localhost:' + actualPort;
         mainWindow.loadURL('http://localhost:' + actualPort);
         resolve({
           stop: function () {
@@ -1009,6 +1026,12 @@ function createWindow() {
           installed: !!ins, installedVersion: ins ? ins.version : null,
           updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0,
           running: appStore.isRunning(a.id),
+          tags: Array.isArray(a.tags) ? a.tags : [],
+          size: (a.artifacts && a.artifacts[platformKey()] && a.artifacts[platformKey()].size) || 0,
+          license: a.license || '',
+          rVersion: a.r_version || '',
+          minShellVersion: a.min_shell_version || '',
+          incompatible: !!(a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0),
           state: ins ? 'installed' : 'not-installed'
         };
       });
@@ -1204,6 +1227,7 @@ function createWindow() {
       })
     }).then(function(result) {
       actualPort = result.port;
+      storeAppUrls[selectedApp.id] = 'http://localhost:' + actualPort;
       mainWindow.loadURL('http://localhost:' + actualPort);
     }).catch(function(err) {
       if (isSupersededStart(err)) return;
@@ -1220,6 +1244,7 @@ function createWindow() {
     var navigate = function() {
       // Trailing slash + 127.0.0.1 (never localhost) keeps one origin and one
       // root-scoped service worker across sub-app navigations.
+      storeAppUrls[selectedApp.id] = 'http://127.0.0.1:' + sharedShinylivePort + '/' + subdir + '/';
       mainWindow.loadURL('http://127.0.0.1:' + sharedShinylivePort + '/' + subdir + '/');
     };
 
@@ -1330,6 +1355,21 @@ function createWindow() {
 
     } else if (actionType === 'run_app') {
       await runStoreApp(action.appId);
+
+    } else if (actionType === 'open_app') {
+      // Re-open a still-running app without restarting it.
+      if (!appStore) return;
+      lastSelectedAppId = action.appId;
+      currentAppMeta = appMetaFor(action.appId);
+      {{#menu_enabled}}
+      createMenu();
+      {{/menu_enabled}}
+      var openUrl = storeAppUrls[action.appId];
+      if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(openUrl);
+      } else {
+        await runStoreApp(action.appId);
+      }
 
     } else if (actionType === 'stop_app') {
       if (!appStore) return;

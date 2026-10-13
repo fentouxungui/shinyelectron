@@ -411,4 +411,4 @@ function createAppStore(options) {
   };
 }
 
-module.exports = { createAppStore, cmpVersion };
+module.exports = { createAppStore, cmpVersion, platformKey };
