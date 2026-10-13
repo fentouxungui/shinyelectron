@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('lifecycle', {
   onStoreStatus: (callback) => {
     ipcRenderer.on('store-status', (_event, data) => callback(data));
   },
+  onStoreCommand: (callback) => {
+    ipcRenderer.on('store-command', (_event, data) => callback(data));
+  },
   installApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'install_app', appId }),
   uninstallApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'uninstall_app', appId }),
   updateApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'update_app', appId }),

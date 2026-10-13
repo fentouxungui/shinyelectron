@@ -6,6 +6,7 @@
   <title>{{app_name}}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       background: {{brand_background}};
@@ -13,9 +14,28 @@
       min-height: 100vh;
       padding: 40px;
     }
-    .header { text-align: center; margin-bottom: 40px; }
+    .header { text-align: center; margin-bottom: 24px; }
     .header h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
     .header p { font-size: 14px; color: #64748b; }
+    .manage-link {
+      display: inline-block; margin-top: 12px; font: inherit; font-size: 13px;
+      color: {{brand_primary}}; background: none; border: none; cursor: pointer;
+      text-decoration: underline;
+    }
+    /* Toolbar: only shown in the manager view */
+    .toolbar { max-width: 960px; margin: 0 auto 20px; display: flex; flex-direction: column; gap: 12px; }
+    .toolbar-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .search {
+      flex: 1 1 260px; min-width: 200px; font: inherit; font-size: 14px;
+      padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff;
+    }
+    .tabs { display: flex; gap: 6px; }
+    .tab {
+      font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 999px;
+      border: 1px solid #cbd5e1; background: #fff; color: #1e293b; cursor: pointer;
+    }
+    .tab.active { background: {{brand_primary}}; border-color: {{brand_primary}}; color: #fff; }
+    .tab .count { opacity: .75; margin-left: 2px; }
     .apps-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -65,20 +85,41 @@
     }
     .btn.primary { background: {{brand_primary}}; border-color: {{brand_primary}}; color: #fff; }
     .btn:disabled { opacity: .5; cursor: default; }
+    .empty { max-width: 960px; margin: 48px auto 0; text-align: center; color: #64748b; font-size: 14px; }
+    .empty .btn { margin-top: 14px; }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>{{app_name}}</h1>
-    <p>Install and run applications</p>
+    <p id="subtitle">Your installed applications</p>
+    <button id="manage-btn" class="manage-link" type="button">Manage apps</button>
+  </div>
+
+  <div class="toolbar" id="toolbar" hidden>
+    <div class="toolbar-row">
+      <div class="tabs" id="tabs">
+        <button class="tab" type="button" data-tab="installed">Installed<span class="count" data-count="installed"></span></button>
+        <button class="tab" type="button" data-tab="all">All<span class="count" data-count="all"></span></button>
+        <button class="tab" type="button" data-tab="updates">Updates<span class="count" data-count="updates"></span></button>
+      </div>
+      <button id="done-btn" class="btn" type="button">Back to my apps</button>
+    </div>
+    <div class="toolbar-row">
+      <input id="search" class="search" type="search" placeholder="Search apps by name, description or author">
+    </div>
   </div>
 
   <div class="apps-grid" id="apps-grid"></div>
+  <div class="empty" id="empty-state" hidden></div>
 
   <script>
     var model = [];
     var byId = {};
     var errors = {};
+    var view = 'launcher';   // 'launcher' | 'manager'
+    var tab = 'installed';   // 'installed' | 'all' | 'updates'
+    var query = '';
 
     var STEP_LABELS = {
       resolve: 'Resolving bundle',
@@ -93,6 +134,7 @@
 
     function makeButton(label, cls, onClick, disabled) {
       var b = document.createElement('button');
+      b.type = 'button';
       b.className = 'btn' + (cls ? ' ' + cls : '');
       b.textContent = label;
       b.disabled = !!disabled;
@@ -100,111 +142,208 @@
       return b;
     }
 
-    function render() {
-      var grid = document.getElementById('apps-grid');
-      grid.innerHTML = '';
-      model.forEach(function (app) {
-        var card = document.createElement('div');
-        card.className = 'app-card';
+    function installedList() { return model.filter(function (a) { return a.installed; }); }
+    function updatesList() { return model.filter(function (a) { return a.installed && a.updateAvailable; }); }
 
-        var icon = document.createElement('div');
-        icon.className = 'app-icon';
-        var initial = (app.name || '?').charAt(0).toUpperCase();
-        if (app.icon && typeof app.icon === 'string' && app.icon.length) {
-          // Real image: no colored background; fill the 64px tile.
-          icon.className = 'app-icon plain';
-          var img = document.createElement('img');
-          img.alt = '';
-          img.onerror = function () {
-            try { icon.removeChild(img); } catch (e) {}
-            icon.className = 'app-icon';
-            icon.textContent = initial;
-          };
-          img.src = app.icon;
-          icon.appendChild(img);
-        } else {
-          icon.textContent = initial;
-        }
-        card.appendChild(icon);
-
-        var name = document.createElement('div');
-        name.className = 'app-name';
-        name.textContent = app.name || app.id;
-        if (app.homepage) {
-          name.className = 'app-name link';
-          name.setAttribute('data-tip', 'click to learn more');
-          name.title = 'click to learn more';
-          name.addEventListener('click', function (ev) {
-            ev.stopPropagation();
-            if (window.lifecycle && window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage);
-          });
-        }
-        card.appendChild(name);
-
-        if (app.description) {
-          var desc = document.createElement('div');
-          desc.className = 'app-desc';
-          desc.textContent = app.description;
-          card.appendChild(desc);
-        }
-
-        var badge = document.createElement('div');
-        badge.className = 'badge';
-        badge.textContent = app.installed
-          ? ('installed ' + (app.installedVersion || ''))
-          : ('v' + (app.catalogVersion || '?') + '  \u00b7  not installed');
-        card.appendChild(badge);
-
-        if (app.state === 'installing') {
-          var prog = document.createElement('div');
-          prog.className = 'progress';
-          var bar = document.createElement('i');
-          bar.style.width = (app.percent || 0) + '%';
-          prog.appendChild(bar);
-          card.appendChild(prog);
-          var st = document.createElement('div');
-          st.className = 'status';
-          st.textContent = stepLabel(app.step, app.statusText);
-          card.appendChild(st);
-        }
-        var err = errors[app.id];
-        if (err) {
-          var se = document.createElement('div');
-          se.className = 'status error';
-          se.textContent = 'Install failed at step "' + (err.step || 'unknown') + '": ' + err.message;
-          card.appendChild(se);
-        }
-
-        var actions = document.createElement('div');
-        actions.className = 'card-actions';
-        if (!window.lifecycle) {
-          // no bridge
-        } else if (!app.installed) {
-          actions.appendChild(makeButton('Install', 'primary', function () {
-            window.lifecycle.installApp(app.id);
-          }, app.state === 'installing'));
-        } else if (app.running) {
-          actions.appendChild(makeButton('Stop', '', function () {
-            window.lifecycle.stopApp(app.id);
-          }));
-        } else {
-          actions.appendChild(makeButton('Run', 'primary', function () {
-            window.lifecycle.runApp(app.id);
-          }, app.state === 'installing'));
-          if (app.updateAvailable) {
-            actions.appendChild(makeButton('Update', '', function () {
-              window.lifecycle.updateApp(app.id);
-            }, app.state === 'installing'));
-          }
-          actions.appendChild(makeButton('Uninstall', '', function () {
-            window.lifecycle.uninstallApp(app.id);
-          }, app.state === 'installing'));
-        }
-        card.appendChild(actions);
-
-        grid.appendChild(card);
+    function sortByName(list) {
+      return list.slice().sort(function (a, b) {
+        return String(a.name || a.id).localeCompare(String(b.name || b.id));
       });
     }
+
+    function matchesQuery(app) {
+      if (!query) return true;
+      var q = query.toLowerCase();
+      return [app.name, app.id, app.description, app.author].some(function (v) {
+        return v && String(v).toLowerCase().indexOf(q) !== -1;
+      });
+    }
+
+    function currentList() {
+      if (view === 'launcher') return sortByName(installedList());
+      var list;
+      if (tab === 'installed') list = installedList();
+      else if (tab === 'updates') list = updatesList();
+      else list = model.slice();
+      return sortByName(list.filter(matchesQuery));
+    }
+
+    function emptyMessage() {
+      if (view === 'launcher') return 'No apps installed yet.';
+      if (tab === 'updates') return 'All installed apps are up to date.';
+      if (query) return 'No apps match "' + query + '".';
+      if (tab === 'installed') return 'No apps installed yet.';
+      return 'No apps available.';
+    }
+
+    function updateChrome() {
+      var manager = view === 'manager';
+      document.getElementById('manage-btn').hidden = manager;
+      document.getElementById('toolbar').hidden = !manager;
+      document.getElementById('subtitle').textContent = manager ? 'Manage applications' : 'Your installed applications';
+      var counts = { installed: installedList().length, all: model.length, updates: updatesList().length };
+      var tabs = document.querySelectorAll('#tabs .tab');
+      for (var i = 0; i < tabs.length; i++) {
+        var b = tabs[i];
+        var t = b.getAttribute('data-tab');
+        if (t === tab) b.classList.add('active'); else b.classList.remove('active');
+        var c = b.querySelector('.count');
+        if (c) c.textContent = '(' + (counts[t] || 0) + ')';
+      }
+    }
+
+    function buildCard(app) {
+      var card = document.createElement('div');
+      card.className = 'app-card';
+
+      var icon = document.createElement('div');
+      icon.className = 'app-icon';
+      var initial = (app.name || '?').charAt(0).toUpperCase();
+      if (app.icon && typeof app.icon === 'string' && app.icon.length) {
+        // Real image: no colored background; fill the 64px tile.
+        icon.className = 'app-icon plain';
+        var img = document.createElement('img');
+        img.alt = '';
+        img.onerror = function () {
+          try { icon.removeChild(img); } catch (e) {}
+          icon.className = 'app-icon';
+          icon.textContent = initial;
+        };
+        img.src = app.icon;
+        icon.appendChild(img);
+      } else {
+        icon.textContent = initial;
+      }
+      card.appendChild(icon);
+
+      var name = document.createElement('div');
+      name.className = 'app-name';
+      name.textContent = app.name || app.id;
+      if (app.homepage) {
+        name.className = 'app-name link';
+        name.setAttribute('data-tip', 'click to learn more');
+        name.title = 'click to learn more';
+        name.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          if (window.lifecycle && window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage);
+        });
+      }
+      card.appendChild(name);
+
+      if (app.description) {
+        var desc = document.createElement('div');
+        desc.className = 'app-desc';
+        desc.textContent = app.description;
+        card.appendChild(desc);
+      }
+
+      var badge = document.createElement('div');
+      badge.className = 'badge';
+      if (app.installed) {
+        var badgeText = 'installed ' + (app.installedVersion || '');
+        if (app.updateAvailable && app.catalogVersion) {
+          badgeText += '  \u00b7  update available (v' + app.catalogVersion + ')';
+        }
+        badge.textContent = badgeText;
+      } else {
+        badge.textContent = 'v' + (app.catalogVersion || '?') + '  \u00b7  not installed';
+      }
+      card.appendChild(badge);
+
+      if (app.state === 'installing') {
+        var prog = document.createElement('div');
+        prog.className = 'progress';
+        var bar = document.createElement('i');
+        bar.style.width = (app.percent || 0) + '%';
+        prog.appendChild(bar);
+        card.appendChild(prog);
+        var st = document.createElement('div');
+        st.className = 'status';
+        st.textContent = stepLabel(app.step, app.statusText);
+        card.appendChild(st);
+      }
+      var err = errors[app.id];
+      if (err) {
+        var se = document.createElement('div');
+        se.className = 'status error';
+        se.textContent = 'Install failed at step "' + (err.step || 'unknown') + '": ' + err.message;
+        card.appendChild(se);
+      }
+
+      var actions = document.createElement('div');
+      actions.className = 'card-actions';
+      if (!window.lifecycle) {
+        // no bridge
+      } else if (!app.installed) {
+        actions.appendChild(makeButton('Install', 'primary', function () {
+          window.lifecycle.installApp(app.id);
+        }, app.state === 'installing'));
+      } else if (app.running) {
+        actions.appendChild(makeButton('Stop', '', function () {
+          window.lifecycle.stopApp(app.id);
+        }));
+      } else {
+        actions.appendChild(makeButton('Run', 'primary', function () {
+          window.lifecycle.runApp(app.id);
+        }, app.state === 'installing'));
+        if (app.updateAvailable) {
+          actions.appendChild(makeButton('Update', '', function () {
+            window.lifecycle.updateApp(app.id);
+          }, app.state === 'installing'));
+        }
+        actions.appendChild(makeButton('Uninstall', '', function () {
+          window.lifecycle.uninstallApp(app.id);
+        }, app.state === 'installing'));
+      }
+      card.appendChild(actions);
+
+      return card;
+    }
+
+    function render() {
+      updateChrome();
+      var grid = document.getElementById('apps-grid');
+      grid.innerHTML = '';
+      var list = currentList();
+      var empty = document.getElementById('empty-state');
+      empty.innerHTML = '';
+      if (list.length === 0) {
+        empty.hidden = false;
+        empty.textContent = emptyMessage();
+        if (view === 'launcher') {
+          empty.appendChild(makeButton('Browse apps', 'primary', function () { setView('manager'); }));
+        }
+      } else {
+        empty.hidden = true;
+      }
+      list.forEach(function (app) { grid.appendChild(buildCard(app)); });
+    }
+
+    function setView(next) {
+      if (next === view) return;
+      view = next;
+      render();
+    }
+    function setTab(next) {
+      if (next === tab) return;
+      tab = next;
+      render();
+    }
+
+    document.getElementById('manage-btn').addEventListener('click', function () { setView('manager'); });
+    document.getElementById('done-btn').addEventListener('click', function () { setView('launcher'); });
+    (function () {
+      var tabs = document.querySelectorAll('#tabs .tab');
+      for (var i = 0; i < tabs.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () { setTab(btn.getAttribute('data-tab')); });
+        })(tabs[i]);
+      }
+    })();
+    document.getElementById('search').addEventListener('input', function () {
+      query = this.value.trim();
+      render();
+    });
 
     async function refresh() {
       if (!window.lifecycle || !window.lifecycle.listApps) { render(); return; }
@@ -216,6 +355,14 @@
         model = [];
       }
       render();
+    }
+
+    if (window.lifecycle && window.lifecycle.onStoreCommand) {
+      window.lifecycle.onStoreCommand(function (cmd) {
+        if (!cmd) return;
+        if (cmd.cmd === 'open_manager') setView('manager');
+        else if (cmd.cmd === 'run' && cmd.appId && window.lifecycle.runApp) window.lifecycle.runApp(cmd.appId);
+      });
     }
 
     if (window.lifecycle && window.lifecycle.onStoreStatus) {

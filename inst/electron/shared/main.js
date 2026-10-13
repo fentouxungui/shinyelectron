@@ -121,6 +121,20 @@ function appMetaFor(id) {
   return buildAppMeta(ce, ins && ins.version, man);
 }
 
+// Launch an installed store app and reflect it in Help/About and the menu.
+// Shared by the launcher's Run button path and the Apps > Quick Run menu.
+async function runStoreApp(appId) {
+  if (!appStore) return;
+  lastSelectedAppId = appId;
+  try { await appStore.fetchCatalog(); } catch (e) { /* entry may already be cached */ }
+  currentAppMeta = appMetaFor(appId);
+  {{#menu_enabled}}
+  createMenu();
+  {{/menu_enabled}}
+  try { await appStore.run(appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: appId, state: 'done' });
+}
+
 // Stop the persistent shinylive server. Called ONLY at quit; the launcher
 // teardown sites deliberately leave it running so the origin (and its
 // root-scoped service worker) survives app-to-app navigation.
@@ -326,6 +340,52 @@ async function showAboutDialog() {
     });
   }
 
+// ---- Apps menu (multi-app) ------------------------------------------------
+// On the launcher: "Quick Run" (installed apps) + "Manage Apps...". While an
+// app runs: "Back to Launcher". createMenu() is rebuilt whenever the installed
+// set or the launcher/app context changes.
+function installedAppMenuItems() {
+  var items = [];
+  if (!appStore) return items;
+  var st;
+  try { st = appStore.getState(); } catch (e) { return items; }
+  Object.keys(st.apps || {}).forEach(function (id) {
+    var m = appMetaFor(id) || {};
+    items.push({ id: id, label: m.name || id });
+  });
+  items.sort(function (a, b) { return a.label.localeCompare(b.label); });
+  return items;
+}
+
+function buildAppsSubmenu() {
+  var sub = [];
+  if (isLauncherVisible) {
+    var installed = installedAppMenuItems();
+    var runItems = installed.length
+      ? installed.map(function (it) {
+          return { label: it.label, click: function () { runStoreApp(it.id); } };
+        })
+      : [{ label: 'No apps installed yet - install one first', enabled: false }];
+    sub.push({ label: 'Quick Run', submenu: runItems });
+    sub.push({ type: 'separator' });
+    sub.push({
+      label: 'Manage Apps\u2026',
+      click: function () {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('store-command', { cmd: 'open_manager' });
+        }
+      }
+    });
+  } else {
+    sub.push({
+      label: 'Back to Launcher',
+      accelerator: 'CmdOrCtrl+L',
+      click: function () { leaveToLauncher(); }
+    });
+  }
+  return sub;
+}
+
 function createMenu() {
   const isMac = process.platform === 'darwin';
   // Multi-app: Help/About and the App menu reflect the running app.
@@ -362,13 +422,7 @@ function createMenu() {
     {{#is_multi_app}}
     {
       label: 'Apps',
-      submenu: [
-        {
-          label: 'Back to Launcher',
-          accelerator: 'CmdOrCtrl+L',
-          click: () => { leaveToLauncher(); }
-        }
-      ]
+      submenu: buildAppsSubmenu()
     },
     {{/is_multi_app}}
     {
@@ -482,13 +536,7 @@ function createMenu() {
     {{#is_multi_app}}
     {
       label: 'Apps',
-      submenu: [
-        {
-          label: 'Back to Launcher',
-          accelerator: 'CmdOrCtrl+L',
-          click: () => { leaveToLauncher(); }
-        }
-      ]
+      submenu: buildAppsSubmenu()
     },
     {{/is_multi_app}}
     {
@@ -535,11 +583,10 @@ function createMenu() {
   ];
   {{/menu_minimal}}
 
-  // On the launcher there is no app to leave, so hide the whole "Apps" menu.
-  const visibleTemplate = (appsManifest && isLauncherVisible)
-    ? template.filter((item) => item.label !== 'Apps')
-    : template;
-  const menu = Menu.buildFromTemplate(visibleTemplate);
+  // The Apps menu is always present for multi-app builds; buildAppsSubmenu()
+  // decides its contents (Quick Run / Manage Apps on the launcher, Back to
+  // Launcher while an app runs).
+  const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
 }
 {{/menu_enabled}}
@@ -956,7 +1003,7 @@ function createWindow() {
       return cat.apps.map((a) => {
         const ins = st.apps[a.id];
         return {
-          id: a.id, name: a.name, description: a.description, icon: a.icon,
+          id: a.id, name: a.name, description: a.description, icon: a.icon, author: a.author || '',
           homepage: a.homepage || a.homepage_url || a.url || '',
           catalogVersion: a.version,
           installed: !!ins, installedVersion: ins ? ins.version : null,
@@ -1277,17 +1324,12 @@ function createWindow() {
       } catch (e) {
         sendStore({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
       }
+      {{#menu_enabled}}
+      createMenu();   // refresh Quick Run after install / uninstall / update
+      {{/menu_enabled}}
 
     } else if (actionType === 'run_app') {
-      if (!appStore) return;
-      lastSelectedAppId = action.appId;
-      try { await appStore.fetchCatalog(); } catch (e) { /* entry may already be cached */ }
-      currentAppMeta = appMetaFor(action.appId);
-      {{#menu_enabled}}
-      createMenu();
-      {{/menu_enabled}}
-      try { await appStore.run(action.appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: action.appId, state: 'done' });
+      await runStoreApp(action.appId);
 
     } else if (actionType === 'stop_app') {
       if (!appStore) return;
