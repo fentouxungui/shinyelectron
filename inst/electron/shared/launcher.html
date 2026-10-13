@@ -23,7 +23,7 @@
       text-decoration: underline;
     }
     /* Toolbar: only shown in the manager view */
-    .toolbar { max-width: 960px; margin: 0 auto 20px; display: flex; flex-direction: column; gap: 12px; }
+    .toolbar { max-width: 100%; margin: 0 auto 20px; display: flex; flex-direction: column; gap: 12px; }
     .toolbar-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .search {
       flex: 1 1 260px; min-width: 200px; font: inherit; font-size: 14px;
@@ -37,7 +37,7 @@
     .tab.active { background: {{brand_primary}}; border-color: {{brand_primary}}; color: #fff; }
     .tab .count { opacity: .75; margin-left: 2px; }
     /* View switch: card grid vs compact list (shown on both pages) */
-    .viewbar { max-width: 960px; margin: 0 auto 12px; display: flex; justify-content: flex-end; }
+    .viewbar { max-width: 100%; margin: 0 auto 12px; display: flex; justify-content: flex-end; }
     .segmented { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; }
     .segmented button { font: inherit; font-size: 12px; padding: 5px 11px; border: none; background: #fff; color: #1e293b; cursor: pointer; }
     .segmented button + button { border-left: 1px solid #cbd5e1; }
@@ -46,7 +46,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
       gap: 16px;
-      max-width: 960px;
+      max-width: 100%;
       margin: 0 auto;
     }
     .app-card {
@@ -103,7 +103,7 @@
     .app-row-main .app-name { margin-bottom: 2px; }
     .app-row-main .badge { margin-top: 6px; }
     .app-row .card-actions { margin: 0; padding: 0; flex: 0 0 auto; }
-    .empty { max-width: 960px; margin: 48px auto 0; text-align: center; color: #64748b; font-size: 14px; }
+    .empty { max-width: 100%; margin: 48px auto 0; text-align: center; color: #64748b; font-size: 14px; }
     .empty .btn { margin-top: 14px; }
   </style>
 </head>
