@@ -1026,18 +1026,22 @@ function createWindow() {
       {{#menu_enabled}}
       createMenu();   // keep the Apps menu (update count / Quick Run) fresh
       {{/menu_enabled}}
+      const plat = platformKey();
       return cat.apps.map((a) => {
         const ins = st.apps[a.id];
+        // Only a platform with a published bundle can be installed/updated here.
+        const art = a.artifacts && a.artifacts[plat];
+        const platformOk = !a.artifacts || !!art;
         return {
           id: a.id, name: a.name, description: a.description, icon: a.icon, author: a.author || '',
           homepage: a.homepage || a.homepage_url || a.url || '',
           catalogVersion: a.version,
           installed: !!ins, installedVersion: ins ? ins.version : null,
-          updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0,
+          updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0 && platformOk,
           running: appStore.isRunning(a.id),
           tags: Array.isArray(a.tags) ? a.tags : [],
-          available: a.artifacts ? !!(a.artifacts[platformKey()]) : true,
-          size: (a.artifacts && a.artifacts[platformKey()] && a.artifacts[platformKey()].size) || 0,
+          available: platformOk,
+          size: (art && art.size) || 0,
           license: a.license || '',
           rVersion: a.r_version || '',
           minShellVersion: a.min_shell_version || '',

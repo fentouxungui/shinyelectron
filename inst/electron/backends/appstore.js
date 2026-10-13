@@ -379,10 +379,15 @@ function createAppStore(options) {
   function forget(id) { running.delete(id); }
 
   function checkUpdates() {
+    const plat = platformKey();
     const out = [];
     for (const [id, app] of Object.entries(state.apps)) {
       const e = catalogEntry(id);
-      if (e && cmpVersion(e.version, app.version) > 0) out.push({ id, from: app.version, to: e.version });
+      if (!e) continue;
+      // Count a newer version only when this platform has a bundle for it;
+      // otherwise there is nothing the user could install here.
+      if (e.artifacts && !e.artifacts[plat]) continue;
+      if (cmpVersion(e.version, app.version) > 0) out.push({ id, from: app.version, to: e.version });
     }
     return out;
   }
