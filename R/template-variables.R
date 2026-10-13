@@ -67,6 +67,9 @@ generate_template_variables <- function(app_name, app_slug, app_type,
   # single-quoted JavaScript literals. Each one also gets a js_str()-escaped
   # `*_js` entry below.
   app_version <- config$app$version %||% SHINYELECTRON_DEFAULTS$app_version
+  # The R runtime the shell bundles (dependencies.r.version). main.js compares
+  # it against a catalog app's r_version to flag an incompatible install.
+  r_version <- config$dependencies$r$version %||% ""
   tray_tooltip <- config$tray$tooltip %||% app_name
   # copy_brand_assets() copies the app icon to assets/icon.<ext>, keeping its
   # extension (icon.ico, icon.icns or icon.png).
@@ -88,6 +91,8 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     app_type = app_type,
     app_version = app_version,
     app_version_js = js_str(app_version),
+    r_version = r_version,
+    r_version_js = js_str(r_version),
 
     # About dialog metadata. main.js renders each value only when its flag
     # is set, so a blank setting leaves out its line or button.

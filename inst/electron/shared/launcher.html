@@ -163,6 +163,15 @@
       .popmenu-item { color: #e2e8f0; }
       .sk { background: linear-gradient(90deg,#1e293b 25%,#334155 37%,#1e293b 63%); background-size: 400% 100%; }
     }
+    .pill.unavailable { background: #f1f5f9; color: #64748b; }
+    .banner { max-width: 100%; margin: 0 auto 12px; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; border-radius: 10px; padding: 10px 14px; font-size: 13px; display: flex; align-items: center; gap: 10px; }
+    .banner .btn { margin-left: auto; }
+    .app-title-row { min-width: 0; }
+    .app-title-row .app-name { min-width: 0; }
+    @media (prefers-color-scheme: dark) {
+      .pill.unavailable { background: #334155; color: #cbd5e1; }
+      .banner { background: #78350f; color: #fde68a; border-color: #92400e; }
+    }
   </style>
 </head>
 <body>
@@ -195,6 +204,7 @@
     <span id="result-count" class="result-count"></span>
   </div>
 
+  <div class="banner" id="banner" hidden></div>
   <div class="apps-grid" id="apps-grid"></div>
   <div class="empty" id="empty-state" hidden></div>
 
@@ -355,16 +365,23 @@
       return row;
     }
 
+    function installBlockedReason(app) {
+      if (app.incompatible) return 'Requires a newer version of ShinyApps' + (app.minShellVersion ? ' (' + app.minShellVersion + ')' : '');
+      if (app.available === false) return 'Not published for this platform';
+      return '';
+    }
+
     function makeStatusPill(app) {
       var pill = document.createElement('span');
       pill.className = 'pill';
-      if (app.incompatible && !app.installed) {
-        pill.className += ' incompatible';
-        pill.textContent = 'Incompatible';
-        return pill;
-      }
       if (app.running) { pill.className += ' running'; pill.textContent = 'Running'; return pill; }
       if (!app.installed) {
+        var reason = installBlockedReason(app);
+        if (reason) {
+          pill.className += app.incompatible ? ' incompatible' : ' unavailable';
+          pill.textContent = app.incompatible ? 'Incompatible' : 'Unavailable';
+          return pill;
+        }
         pill.className += ' notinstalled';
         pill.textContent = 'Not installed' + (app.catalogVersion ? ' \u00b7 v' + app.catalogVersion : '');
         return pill;
@@ -464,12 +481,13 @@
       actions.className = 'card-actions';
       if (!window.lifecycle) return actions;
       if (!app.installed) {
+        var reason = installBlockedReason(app);
         var installBtn = makeButton('Install', 'primary', function () {
           window.lifecycle.installApp(app.id);
-        }, app.state === 'installing' || !!app.incompatible);
-        if (app.incompatible) {
+        }, app.state === 'installing' || !!reason);
+        if (reason) {
           installBtn.disabled = true;
-          installBtn.title = 'Requires a newer version of ShinyApps' + (app.minShellVersion ? ' (' + app.minShellVersion + ')' : '');
+          installBtn.title = reason;
         }
         actions.appendChild(installBtn);
       } else if (app.running) {
@@ -569,6 +587,13 @@
       container.className = 'apps-grid' + (layout === 'list' ? ' list-view' : '');
       var empty = document.getElementById('empty-state');
       empty.innerHTML = '';
+      var banner = document.getElementById('banner');
+      banner.hidden = !(loadError && model.length > 0);
+      banner.textContent = '';
+      if (!banner.hidden) {
+        banner.textContent = 'Could not refresh the catalog \u2014 showing the last known list. ';
+        banner.appendChild(makeButton('Retry', '', function () { refresh(); }));
+      }
 
       if (loading && model.length === 0) {
         empty.hidden = true;
@@ -657,24 +682,39 @@
       if (m && !m.contains(ev.target)) closePopmenu();
     }
     function escClosePopmenu(ev) { if (ev.key === 'Escape') closePopmenu(); }
+    function menuKeyNav(ev) {
+      var m = document.getElementById('popmenu');
+      if (!m) return;
+      var items = Array.prototype.slice.call(m.querySelectorAll('.popmenu-item'));
+      if (!items.length) return;
+      var idx = items.indexOf(document.activeElement);
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); items[(idx + 1) % items.length].focus(); }
+      else if (ev.key === 'ArrowUp') { ev.preventDefault(); items[(idx - 1 + items.length) % items.length].focus(); }
+    }
     function closePopmenu() {
       var m = document.getElementById('popmenu');
+      var anchor = m && m.__anchor;
       if (m) m.remove();
       document.removeEventListener('click', docClosePopmenu, true);
       document.removeEventListener('keydown', escClosePopmenu);
+      document.removeEventListener('keydown', menuKeyNav);
       window.removeEventListener('resize', closePopmenu);
       window.removeEventListener('scroll', closePopmenu, true);
+      if (anchor && anchor.focus) anchor.focus();
     }
     function openPopmenu(anchor, items) {
       closePopmenu();
       var menu = document.createElement('div');
       menu.className = 'popmenu';
       menu.id = 'popmenu';
+      menu.setAttribute('role', 'menu');
+      menu.__anchor = anchor;
       items.forEach(function (it) {
         var b = document.createElement('button');
         b.type = 'button';
         b.className = 'popmenu-item' + (it.danger ? ' danger' : '');
         b.textContent = it.label;
+        b.setAttribute('role', 'menuitem');
         b.addEventListener('click', function (ev) { ev.stopPropagation(); closePopmenu(); it.onClick(); });
         menu.appendChild(b);
       });
@@ -688,9 +728,12 @@
       if (top + h > window.innerHeight - 8) top = Math.max(8, rect.top - h - 6);
       menu.style.left = left + 'px';
       menu.style.top = top + 'px';
+      var first = menu.querySelector('.popmenu-item');
+      if (first) first.focus();
       setTimeout(function () {
         document.addEventListener('click', docClosePopmenu, true);
         document.addEventListener('keydown', escClosePopmenu);
+        document.addEventListener('keydown', menuKeyNav);
         window.addEventListener('resize', closePopmenu);
         window.addEventListener('scroll', closePopmenu, true);
       }, 0);
@@ -698,12 +741,23 @@
 
     // --- Confirm dialog -----------------------------------------------------
     function confirmEsc(ev) { if (ev.key === 'Escape') closeConfirm(); }
+    function dialogTab(ev) {
+      if (ev.key !== 'Tab') return;
+      var d = document.getElementById('dialog');
+      if (!d) return;
+      var f = d.querySelectorAll('button');
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1];
+      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+    }
     function closeConfirm() {
       var o = document.getElementById('overlay');
       if (o) o.hidden = true;
       var d = document.getElementById('dialog');
       if (d) d.innerHTML = '';
       document.removeEventListener('keydown', confirmEsc);
+      document.removeEventListener('keydown', dialogTab);
     }
     function showConfirm(opts) {
       var overlay = document.getElementById('overlay');
@@ -711,8 +765,10 @@
       dialog.innerHTML = '';
       var h = document.createElement('div');
       h.className = 'dialog-title';
+      h.id = 'dialog-title';
       h.textContent = opts.title;
       dialog.appendChild(h);
+      dialog.setAttribute('aria-labelledby', 'dialog-title');
       var p = document.createElement('div');
       p.className = 'dialog-msg';
       p.textContent = opts.message;
@@ -729,6 +785,7 @@
       overlay.hidden = false;
       setTimeout(function () { ok.focus(); }, 0);
       document.addEventListener('keydown', confirmEsc);
+      document.addEventListener('keydown', dialogTab);
     }
     function confirmUninstall(app) {
       showConfirm({
@@ -822,7 +879,7 @@
         if (!cmd) return;
         if (cmd.cmd === 'open_manager') {
           if (cmd.tab && ['installed', 'all', 'updates', 'running'].indexOf(cmd.tab) !== -1) tab = cmd.tab;
-          setView('manager');
+          if (view === 'manager') render(); else setView('manager');
         } else if (cmd.cmd === 'run' && cmd.appId && window.lifecycle.runApp) {
           window.lifecycle.runApp(cmd.appId);
         }
@@ -866,7 +923,7 @@
         if (ev.state === 'error') {
           showToast('Failed to install ' + nm + (ev.step ? ' (' + ev.step + ')' : ''), 'error');
         }
-        if (ev.state === 'done' || ev.state === 'error') refresh();
+        if (ev.op || ev.state === 'error') refresh();
       });
     }
 

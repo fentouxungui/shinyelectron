@@ -19,6 +19,7 @@ const { createAppStore, cmpVersion, platformKey } = require('./backends/appstore
 
 // File logging -- writes to configured log directory or app userData
 const LOG_LEVEL = '{{{log_level_js}}}';
+const SHELL_R_VERSION = '{{{r_version_js}}}';   // R version the shell bundles
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 const LOG_THRESHOLD = LOG_LEVEL in LOG_LEVELS ? LOG_LEVELS[LOG_LEVEL] : 1;
 
@@ -133,7 +134,12 @@ async function runStoreApp(appId) {
   {{#menu_enabled}}
   createMenu();
   {{/menu_enabled}}
-  try { await appStore.run(appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
+  var openUrl = appStore.isRunning(appId) ? storeAppUrls[appId] : null;
+  if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.loadURL(openUrl);   // already running: switch back, do not restart
+  } else {
+    try { await appStore.run(appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
+  }
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: appId, state: 'done' });
 }
 
@@ -1017,6 +1023,9 @@ function createWindow() {
       // Force a fresh catalog so a newly registered app appears without restarting.
       const cat = await appStore.fetchCatalog({ force: true });
       const st = appStore.getState();
+      {{#menu_enabled}}
+      createMenu();   // keep the Apps menu (update count / Quick Run) fresh
+      {{/menu_enabled}}
       return cat.apps.map((a) => {
         const ins = st.apps[a.id];
         return {
@@ -1027,11 +1036,15 @@ function createWindow() {
           updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0,
           running: appStore.isRunning(a.id),
           tags: Array.isArray(a.tags) ? a.tags : [],
+          available: a.artifacts ? !!(a.artifacts[platformKey()]) : true,
           size: (a.artifacts && a.artifacts[platformKey()] && a.artifacts[platformKey()].size) || 0,
           license: a.license || '',
           rVersion: a.r_version || '',
           minShellVersion: a.min_shell_version || '',
-          incompatible: !!(a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0),
+          incompatible: !!(
+            (SHELL_R_VERSION && a.r_version && cmpVersion(SHELL_R_VERSION, a.r_version) < 0) ||
+            (a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0)
+          ),
           state: ins ? 'installed' : 'not-installed'
         };
       });
