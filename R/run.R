@@ -120,7 +120,7 @@ run_electron_app <- function(app_dir, port = 3000, open_devtools = TRUE, verbose
   }
 
   if (verbose) {
-    cli::cli_alert_success("Electron application started successfully")
+    cli::cli_alert_success("Electron application exited normally")
   }
 
   invisible(result)

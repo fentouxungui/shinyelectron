@@ -184,7 +184,7 @@ class NativeRBackend extends EventEmitter {
       }
     }
 
-    // 3. Check for auto-downloaded runtime via manifest
+    // 2. Check for auto-downloaded runtime via manifest
     if (config && config.runtime_strategy === 'auto-download') {
       try {
         const manifestPath = resolveRuntimeManifestPath(appPath);
@@ -476,7 +476,7 @@ class NativeRBackend extends EventEmitter {
       if (fs.existsSync(bundledLib)) libPaths.push(esc(bundledLib));
       if (userLibPath) libPaths.push(esc(userLibPath));
       
-      const safeAppPath = appPath.replace(/\\/g, '/').replace(/'/g, "\\'").replace(/"/g, '\\"');
+      const safeAppPath = appPath.replace(/\\/g, '/').replace(/[\r\n]/g, '').replace(/'/g, "\\'").replace(/"/g, '\\"');
 
       let rCode;
       if (libPaths.length > 0) {

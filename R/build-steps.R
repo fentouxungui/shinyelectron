@@ -148,6 +148,7 @@ build_for_platforms <- function(output_dir, platform, arch, sign = FALSE,
   build_env <- electron_builder_env(config, sign)
 
   # Build for each platform/arch combination
+  any_success <- FALSE
   for (p in platform) {
     for (a in arch) {
       target <- paste0(p, "-", a)
@@ -188,11 +189,13 @@ build_for_platforms <- function(output_dir, platform, arch, sign = FALSE,
         }
 
         if (result$status == 0) {
+          any_success <- TRUE
           if (verbose) cli::cli_alert_success("Built for {target}")
           next
         } else if (dist_has_platform_artifact(output_dir, p)) {
           # electron-builder 26.x exits 1 during post-build publish metadata
           # even after the installer is written. Artifact exists => success.
+          any_success <- TRUE
           if (verbose) cli::cli_alert_success("Built for {target}")
           next
         } else {
@@ -244,21 +247,43 @@ build_for_platforms <- function(output_dir, platform, arch, sign = FALSE,
         }
 
         if (fallback_result$status == 0) {
-          cli::cli_alert_success("Built for {p} (fallback - may include multiple architectures)")
+          any_success <- TRUE
+          if (verbose) cli::cli_alert_success("Built for {p} (fallback - may include multiple architectures)")
         } else if (dist_has_platform_artifact(output_dir, p)) {
-          cli::cli_alert_success("Built for {p} (fallback - may include multiple architectures)")
+          any_success <- TRUE
+          if (verbose) cli::cli_alert_success("Built for {p} (fallback - may include multiple architectures)")
         } else {
-          cli::cli_alert_warning("Fallback build also failed for {p} (exit {fallback_result$status})")
-          fb_out <- trimws(paste(fallback_result$stdout, fallback_result$stderr, sep = "\n"))
-          if (nzchar(fb_out)) {
-            cli::cli_verbatim(utils::tail(
-              strsplit(fb_out, "\n", fixed = TRUE)[[1]], 30
-            ))
+          if (verbose) {
+            cli::cli_alert_warning("Fallback build also failed for {p} (exit {fallback_result$status})")
+            fb_out <- trimws(paste(fallback_result$stdout, fallback_result$stderr, sep = "\n"))
+            if (nzchar(fb_out)) {
+              cli::cli_verbatim(utils::tail(
+                strsplit(fb_out, "\n", fixed = TRUE)[[1]], 30
+              ))
+            }
           }
         }
       } else {
-        cli::cli_alert_warning("No build script found for platform {p}")
+        if (verbose) cli::cli_alert_warning("No build script found for platform {p}")
       }
     }
+  }
+
+  # Fail loudly when nothing was produced, so CI never treats an empty build
+  # as success. A platform counts as built when its script exited 0 or an
+  # artifact already exists in dist/ (electron-builder's post-build exit 1).
+  artifact_ok <- FALSE
+  for (p in platform) {
+    if (isTRUE(dist_has_platform_artifact(output_dir, p))) {
+      artifact_ok <- TRUE
+      break
+    }
+  }
+  if (!any_success && !artifact_ok) {
+    cli::cli_abort(c(
+      "Build produced no artifacts for any target platform.",
+      "i" = "Looked for installers for: {paste(platform, collapse = ', ')}",
+      "i" = "See the build output above (run with {.code verbose = TRUE} for full details)."
+    ))
   }
 }

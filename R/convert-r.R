@@ -153,7 +153,7 @@ convert_shiny_to_shinylive <- function(
       cli::cli_abort(c(
         "Failed to convert Shiny app to shinylive",
         "x" = "Error: {e$message}"
-      ))
+      ), parent = e)
     }
   )
 }

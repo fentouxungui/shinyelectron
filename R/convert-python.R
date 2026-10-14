@@ -113,6 +113,6 @@ convert_py_to_shinylive <- function(appdir, output_dir, subdir = NULL, overwrite
     cli::cli_abort(c(
       "Failed to convert Python Shiny app to shinylive",
       "x" = "Error: {e$message}"
-    ))
+    ), parent = e)
   })
 }

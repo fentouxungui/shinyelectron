@@ -166,7 +166,7 @@ class NativePyBackend extends EventEmitter {
       }
     }
 
-    // 3. Check for auto-downloaded runtime via manifest
+    // 2. Check for auto-downloaded runtime via manifest
     if (config && config.runtime_strategy === 'auto-download') {
       try {
         const manifestPath = resolveRuntimeManifestPath(appPath);
