@@ -266,6 +266,7 @@ function createAppStore(options) {
 
     const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
     let step = 'download';
+    let staging = null;
     // Need room for the archive plus its unpacked contents (small margin).
     const free = await freeBytes(cacheDir);
     const need = (art.size || 0) * 3;
@@ -310,7 +311,7 @@ function createAppStore(options) {
 
       step = 'install';
       onProgress({ phase: 'unpacking', percent: 0, statusText: 'unpacking' });
-      const staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
+      staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
       await fsp.rm(staging, { recursive: true, force: true });
       await unzip(zip, staging, onProgress);
 
@@ -337,6 +338,7 @@ function createAppStore(options) {
       await fsp.rm(zip, { force: true }).catch(() => {});
       return { id, version: manifest.version };
     } catch (e) {
+      if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
       if (e && !e.step) e.step = step;
       throw e;
     }
@@ -396,6 +398,7 @@ function createAppStore(options) {
       if (!ok) { const e = new Error('cancelled'); e.step = 'confirm'; e.cancelled = true; throw e; }
 
       const id = manifest.id;
+      const old = state.apps[id] || null;
       const finalDir = path.join(appsDir, id, manifest.version);
       await fsp.mkdir(path.dirname(finalDir), { recursive: true });
       await fsp.rm(finalDir, { recursive: true, force: true });
@@ -413,6 +416,11 @@ function createAppStore(options) {
         meta: bundleMeta(manifest),
       };
       saveState();
+      // Reclaim the previous version's files and shared-library refs.
+      await pruneRefs(id, state.apps[id].packages);
+      if (old && old.dir && path.resolve(old.dir) !== path.resolve(finalDir)) {
+        await fsp.rm(old.dir, { recursive: true, force: true }).catch(() => {});
+      }
       log(`installed local bundle ${id}@${manifest.version}`);
       onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
       return { id, version: manifest.version };
@@ -469,7 +477,8 @@ function createAppStore(options) {
     const app = state.apps[id];
     if (!app) throw new Error(`${id} is not installed`);
     if (running.has(id)) return running.get(id);
-    const appPath = path.join(app.dir, 'app');
+    const entry = app.meta && app.meta.entry;
+    const appPath = entry ? path.join(app.dir, path.dirname(entry)) : path.join(app.dir, 'app');
     const libPaths = [path.join(privateRoot, id), sharedLib];
     log(`run ${id}: appPath=${appPath} libs=${libPaths.join(path.delimiter)}`);
     const handle = await startBackend({ appId: id, appPath, libPaths });
@@ -520,6 +529,7 @@ function createAppStore(options) {
     isRunning: (id) => running.has(id),
     forget,
     getState: () => state,
+    getCatalog: () => catalog,
   };
 }
 

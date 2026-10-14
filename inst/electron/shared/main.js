@@ -145,6 +145,12 @@ function appMetaFor(id) {
 // Shared by the launcher's Run button path and the Apps > Quick Run menu.
 async function runStoreApp(appId) {
   if (!appStore) return;
+  if (storeBusy) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('store-status', { id: appId, state: 'busy', message: 'A store operation is in progress; please wait until it finishes.' });
+    }
+    return;
+  }
   lastSelectedAppId = appId;
   try { await appStore.fetchCatalog(); } catch (e) { /* entry may already be cached */ }
   currentAppMeta = appMetaFor(appId);
@@ -434,6 +440,22 @@ function openManagerFromMenu(tab) {
   }
 }
 
+// Rebuild the native menu only when something it shows actually changed
+// (launcher/app context, installed set, or update count) -- not on every
+// catalog refresh.
+var lastMenuSig = '';
+function menuSignature() {
+  var ids = installedAppMenuItems().map(function (it) { return it.id; }).join(',');
+  var updates = 0;
+  try { updates = appStore ? appStore.checkUpdates().length : 0; } catch (e) { updates = 0; }
+  return (isLauncherVisible ? 'L' : 'A') + '|' + ids + '|' + updates;
+}
+function refreshMenuIfChanged() {
+  var sig = menuSignature();
+  if (sig === lastMenuSig) return;
+  createMenu();
+}
+
 function createMenu() {
   const isMac = process.platform === 'darwin';
   // Multi-app: Help/About and the App menu reflect the running app.
@@ -636,6 +658,7 @@ function createMenu() {
   // Launcher while an app runs).
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
+  lastMenuSig = menuSignature();
 }
 {{/menu_enabled}}
 
@@ -1049,10 +1072,18 @@ function createWindow() {
     });
     ipcMain.handle('store-list', async () => {
       // Force a fresh catalog so a newly registered app appears without restarting.
-      const cat = await appStore.fetchCatalog({ force: true });
+      let cat;
+      try {
+        cat = await appStore.fetchCatalog({ force: true });
+      } catch (e) {
+        // Offline / catalog outage: fall back to the cached catalog (or none)
+        // so installed and sideloaded apps stay visible and runnable.
+        log('warn', 'catalog fetch failed; using cached/installed data:', e && e.message);
+        cat = appStore.getCatalog() || { apps: [] };
+      }
       const st = appStore.getState();
       {{#menu_enabled}}
-      createMenu();   // keep the Apps menu (update count / Quick Run) fresh
+      refreshMenuIfChanged();   // keep the Apps menu (update count / Quick Run) fresh
       {{/menu_enabled}}
       const plat = platformKey();
       const list = cat.apps.map((a) => {
@@ -1060,12 +1091,16 @@ function createWindow() {
         // Only a platform with a published bundle can be installed/updated here.
         const art = a.artifacts && a.artifacts[plat];
         const platformOk = !a.artifacts || !!art;
+        const incompatible = !!(
+          (SHELL_R_VERSION && a.r_version && cmpVersion(SHELL_R_VERSION, a.r_version) < 0) ||
+          (a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0)
+        );
         return {
           id: a.id, name: a.name, description: a.description, icon: a.icon, author: a.author || '',
           homepage: a.homepage || a.homepage_url || a.url || '',
           catalogVersion: a.version,
           installed: !!ins, installedVersion: ins ? ins.version : null,
-          updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0 && platformOk,
+          updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0 && platformOk && !incompatible,
           running: appStore.isRunning(a.id),
           tags: Array.isArray(a.tags) ? a.tags : [],
           available: platformOk,
@@ -1073,10 +1108,7 @@ function createWindow() {
           license: a.license || '',
           rVersion: a.r_version || '',
           minShellVersion: a.min_shell_version || '',
-          incompatible: !!(
-            (SHELL_R_VERSION && a.r_version && cmpVersion(SHELL_R_VERSION, a.r_version) < 0) ||
-            (a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0)
-          ),
+          incompatible: incompatible,
           state: ins ? 'installed' : 'not-installed'
         };
       });
@@ -1097,7 +1129,7 @@ function createWindow() {
           tags: [], available: true, size: 0,
           license: lm.license || '', rVersion: lm.rVersion || '',
           minShellVersion: '', incompatible: false,
-          local: true,
+          local: (lins && lins.source) !== 'catalog',
           state: 'installed'
         });
       });
@@ -1417,6 +1449,7 @@ function createWindow() {
       try {
         sendStore({ state: 'installing', op: actionType, statusText: 'working...' });
         await storeJob();
+        if (actionType === 'uninstall_app' || actionType === 'update_app') delete storeAppUrls[storeId];
         sendStore({ state: 'done', op: actionType });
       } catch (e) {
         sendStore({ state: 'error', op: actionType, error: (e && e.message) || String(e), step: (e && e.step) || '' });
@@ -1483,6 +1516,12 @@ function createWindow() {
     } else if (actionType === 'open_app') {
       // Re-open a still-running app without restarting it.
       if (!appStore) return;
+      if (storeBusy) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('store-status', { id: action.appId, state: 'busy', message: 'A store operation is in progress; please wait until it finishes.' });
+        }
+        return;
+      }
       lastSelectedAppId = action.appId;
       currentAppMeta = appMetaFor(action.appId);
       {{#menu_enabled}}
