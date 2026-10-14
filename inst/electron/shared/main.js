@@ -86,6 +86,8 @@ let isLauncherVisible = true;   // true while the launcher page is shown (multi-
 let appStore = null;
 // Last loaded URL per catalog app id, so a still-running app can be re-opened.
 var storeAppUrls = {};
+// Single-flight guard: only one install/update/uninstall may run at a time.
+let storeBusy = false;
 
 // Per-app metadata for Help/About and the in-app update check. Set when an app
 // is launched; reset to null on the launcher so Help/About show the shell.
@@ -1355,16 +1357,23 @@ function createWindow() {
       if (!appStore) return;
       var storeId = action.appId;
       var sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
+      if (storeBusy) {
+        sendStore({ state: 'busy', message: 'Another operation is in progress; please wait until it finishes.' });
+        return;
+      }
       var storeProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
       var storeJob = actionType === 'install_app'
         ? function () { return appStore.install(storeId, storeProg); }
         : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId, storeProg); };
+      storeBusy = true;
       try {
         sendStore({ state: 'installing', statusText: 'working...' });
         await storeJob();
         sendStore({ state: 'done', op: actionType });
       } catch (e) {
         sendStore({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
+      } finally {
+        storeBusy = false;
       }
       {{#menu_enabled}}
       createMenu();   // refresh Quick Run after install / uninstall / update

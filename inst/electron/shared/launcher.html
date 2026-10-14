@@ -172,6 +172,8 @@
       .pill.unavailable { background: #334155; color: #cbd5e1; }
       .banner { background: #78350f; color: #fde68a; border-color: #92400e; }
     }
+    .busybar { max-width: 100%; margin: 0 auto 12px; background: #dbeafe; color: #1e3a8a; border: 1px solid #bfdbfe; border-radius: 10px; padding: 10px 14px; font-size: 13px; display: flex; align-items: center; gap: 10px; }
+    @media (prefers-color-scheme: dark) { .busybar { background: #1e3a8a; color: #bfdbfe; border-color: #1e40af; } }
   </style>
 </head>
 <body>
@@ -204,6 +206,7 @@
     <span id="result-count" class="result-count"></span>
   </div>
 
+  <div class="busybar" id="busybar" hidden></div>
   <div class="banner" id="banner" hidden></div>
   <div class="apps-grid" id="apps-grid"></div>
   <div class="empty" id="empty-state" hidden></div>
@@ -251,6 +254,7 @@
     function installedList() { return model.filter(function (a) { return a.installed; }); }
     function updatesList() { return model.filter(function (a) { return a.installed && a.updateAvailable; }); }
     function runningList() { return model.filter(function (a) { return a.running; }); }
+    function anyInstalling() { return model.some(function (a) { return a.state === 'installing'; }); }
 
     function sortByName(list) {
       return list.slice().sort(function (a, b) {
@@ -456,7 +460,7 @@
       b.textContent = '\u2026';
       b.title = 'More actions';
       b.setAttribute('aria-label', 'More actions');
-      b.disabled = app.state === 'installing';
+      b.disabled = app.state === 'installing' || anyInstalling();
       b.addEventListener('click', function (ev) {
         ev.stopPropagation();
         openPopmenu(b, overflowItems(app));
@@ -480,11 +484,12 @@
       var actions = document.createElement('div');
       actions.className = 'card-actions';
       if (!window.lifecycle) return actions;
+      var lock = anyInstalling();   // another app is installing: freeze all actions
       if (!app.installed) {
         var reason = installBlockedReason(app);
         var installBtn = makeButton('Install', 'primary', function () {
           window.lifecycle.installApp(app.id);
-        }, app.state === 'installing' || !!reason);
+        }, lock || app.state === 'installing' || !!reason);
         if (reason) {
           installBtn.disabled = true;
           installBtn.title = reason;
@@ -493,19 +498,19 @@
       } else if (app.running) {
         actions.appendChild(makeButton('Open', 'primary', function () {
           window.lifecycle.openApp(app.id);
-        }));
+        }, lock));
         actions.appendChild(makeButton('Stop', '', function () {
           window.lifecycle.stopApp(app.id);
-        }));
+        }, lock));
         actions.appendChild(makeOverflowButton(app));
       } else {
         actions.appendChild(makeButton('Run', 'primary', function () {
           window.lifecycle.runApp(app.id);
-        }, app.state === 'installing'));
+        }, lock || app.state === 'installing'));
         if (app.updateAvailable) {
           actions.appendChild(makeButton('Update', '', function () {
             window.lifecycle.updateApp(app.id);
-          }, app.state === 'installing'));
+          }, lock || app.state === 'installing'));
         }
         actions.appendChild(makeOverflowButton(app));
       }
@@ -515,6 +520,7 @@
     function buildCard(app) {
       var card = document.createElement('div');
       card.className = 'app-card';
+      card.setAttribute('data-app-id', app.id);
       card.appendChild(makeIcon(app, false));
       card.appendChild(makeTitle(app));
       if (app.description) {
@@ -534,6 +540,7 @@
     function buildRow(app) {
       var row = document.createElement('div');
       row.className = 'app-row';
+      row.setAttribute('data-app-id', app.id);
       row.appendChild(makeIcon(app, true));
       var main = document.createElement('div');
       main.className = 'app-row-main';
@@ -593,6 +600,13 @@
       if (!banner.hidden) {
         banner.textContent = 'Could not refresh the catalog \u2014 showing the last known list. ';
         banner.appendChild(makeButton('Retry', '', function () { refresh(); }));
+      }
+      var busybar = document.getElementById('busybar');
+      var busy = anyInstalling();
+      busybar.hidden = !busy;
+      if (busy) {
+        var ba = model.filter(function (a) { return a.state === 'installing'; })[0];
+        busybar.textContent = 'Installing ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks.';
       }
 
       if (loading && model.length === 0) {
@@ -886,9 +900,25 @@
       });
     }
 
+    // Progress ticks update only the affected card, so the grid no longer
+    // rebuilds many times a second (which could swallow clicks on other cards).
+    function updateCardProgress(app) {
+      var el = document.querySelector('[data-app-id="' + app.id + '"]');
+      if (!el) { render(); return; }
+      var bar = el.querySelector('.progress > i');
+      if (bar) bar.style.width = (app.percent || 0) + '%';
+      var st = el.querySelector('.status');
+      if (st) st.textContent = (app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText);
+    }
+
     if (window.lifecycle && window.lifecycle.onStoreStatus) {
       window.lifecycle.onStoreStatus(function (ev) {
+        if (ev.state === 'busy') {
+          showToast(ev.message || 'Another operation is in progress; please wait.', 'error');
+          return;
+        }
         var app = byId[ev.id];
+        var wasInstalling = !!(app && app.state === 'installing');
         if (ev.state === 'installing') delete errors[ev.id];
         if (ev.state === 'done') delete errors[ev.id];
         if (ev.state === 'error') errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed' };
@@ -913,7 +943,8 @@
             app.state = 'installed';
             app.percent = 0;
           }
-          render();
+          if (ev.state === 'installing' && wasInstalling) updateCardProgress(app);
+          else render();
         }
         var nm = (app && app.name) || ev.id;
         if (ev.state === 'done' && ev.op) {
