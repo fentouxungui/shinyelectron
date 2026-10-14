@@ -176,6 +176,8 @@
     @media (prefers-color-scheme: dark) { .busybar { background: #1e3a8a; color: #bfdbfe; border-color: #1e40af; } }
     .pill.local { background: #e0e7ff; color: #3730a3; }
     @media (prefers-color-scheme: dark) { .pill.local { background: #312e81; color: #c7d2fe; } }
+    .pill.busy { background: #dbeafe; color: #1e40af; }
+    @media (prefers-color-scheme: dark) { .pill.busy { background: #1e3a8a; color: #bfdbfe; } }
   </style>
 </head>
 <body>
@@ -237,11 +239,23 @@
       resolve: 'Resolving bundle',
       download: 'Downloading',
       verifying: 'Verifying download',
-      unpacking: 'Installing (unpacking)',
-      linking: 'Installing (linking packages)'
+      unpacking: 'Unpacking',
+      linking: 'Linking packages'
     };
     function stepLabel(step, fallback) {
       return STEP_LABELS[step] || fallback || 'Installing\u2026';
+    }
+    function opVerb(op) {
+      if (op === 'update_app') return 'Updating';
+      if (op === 'uninstall_app') return 'Uninstalling';
+      if (op === 'install_app' || op === 'install_bundle') return 'Installing';
+      return 'Working on';
+    }
+    function opAction(op) {
+      if (op === 'update_app') return 'update';
+      if (op === 'uninstall_app') return 'uninstall';
+      if (op === 'install_app') return 'install';
+      return 'complete';
     }
 
     function makeButton(label, cls, onClick, disabled) {
@@ -391,6 +405,11 @@
     function makeStatusPill(app) {
       var pill = document.createElement('span');
       pill.className = 'pill';
+      if (app.state === 'installing' && app.op) {
+        pill.className += ' busy';
+        pill.textContent = opVerb(app.op) + '\u2026';
+        return pill;
+      }
       if (app.running) { pill.className += ' running'; pill.textContent = 'Running'; return pill; }
       if (!app.installed) {
         var reason = installBlockedReason(app);
@@ -448,14 +467,14 @@
         container.appendChild(prog);
         var st = document.createElement('div');
         st.className = 'status';
-        st.textContent = (app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText);
+        st.textContent = app.step ? ((app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText)) : (opVerb(app.op) + '\u2026');
         container.appendChild(st);
       }
       var err = errors[app.id];
       if (err) {
         var se = document.createElement('div');
         se.className = 'status error';
-        se.textContent = 'Install failed at step "' + (err.step || 'unknown') + '": ' + err.message + ' ';
+        se.textContent = 'Failed to ' + opAction(err.op) + (err.step ? ' at step "' + err.step + '"' : '') + ': ' + err.message + ' ';
         var dis = document.createElement('button');
         dis.type = 'button';
         dis.className = 'link-btn';
@@ -623,7 +642,7 @@
         var ba = model.filter(function (a) { return a.state === 'installing'; })[0];
         busybar.textContent = bundleBusy
           ? ('Installing from bundle \u2014 ' + (bundleStatus || 'please wait') + ' \u2014 do not start other tasks.')
-          : ('Installing ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks.');
+          : (opVerb(ba && ba.op) + ' ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks.');
       }
 
       if (loading && model.length === 0) {
@@ -936,7 +955,7 @@
       var bar = el.querySelector('.progress > i');
       if (bar) bar.style.width = (app.percent || 0) + '%';
       var st = el.querySelector('.status');
-      if (st) st.textContent = (app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText);
+      if (st) st.textContent = app.step ? ((app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText)) : (opVerb(app.op) + '\u2026');
     }
 
     if (window.lifecycle && window.lifecycle.onStoreStatus) {
@@ -959,9 +978,10 @@
         var wasInstalling = !!(app && app.state === 'installing');
         if (ev.state === 'installing') delete errors[ev.id];
         if (ev.state === 'done') delete errors[ev.id];
-        if (ev.state === 'error') errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed' };
+        if (ev.state === 'error') errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed', op: ev.op || '' };
         if (app) {
           if (ev.state) app.state = ev.state;
+          if (ev.op) app.op = ev.op;
           if (typeof ev.percent === 'number') app.percent = ev.percent;
           if (ev.statusText) app.statusText = ev.statusText;
           if (ev.step) app.step = ev.step;
@@ -990,7 +1010,7 @@
           if (verb) showToast(verb + nm, 'success');
         }
         if (ev.state === 'error') {
-          showToast('Failed to install ' + nm + (ev.step ? ' (' + ev.step + ')' : ''), 'error');
+          showToast('Failed to ' + opAction(ev.op) + ' ' + nm + (ev.step ? ' (' + ev.step + ')' : ''), 'error');
         }
         if (ev.op || ev.state === 'error') refresh();
       });

@@ -1409,17 +1409,17 @@ function createWindow() {
         sendStore({ state: 'busy', message: 'Another operation is in progress; please wait until it finishes.' });
         return;
       }
-      var storeProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
+      var storeProg = function (pp) { sendStore({ state: 'installing', op: actionType, percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
       var storeJob = actionType === 'install_app'
         ? function () { return appStore.install(storeId, storeProg); }
         : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId, storeProg); };
       storeBusy = true;
       try {
-        sendStore({ state: 'installing', statusText: 'working...' });
+        sendStore({ state: 'installing', op: actionType, statusText: 'working...' });
         await storeJob();
         sendStore({ state: 'done', op: actionType });
       } catch (e) {
-        sendStore({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
+        sendStore({ state: 'error', op: actionType, error: (e && e.message) || String(e), step: (e && e.step) || '' });
       } finally {
         storeBusy = false;
       }
