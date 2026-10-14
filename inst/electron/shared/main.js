@@ -123,6 +123,21 @@ function appMetaFor(id) {
     try { ce = appStore.catalogEntry(id); } catch (e) {}
     try { ins = appStore.getState().apps[id]; } catch (e) {}
   }
+  // A sideloaded (non-catalog) app has no catalog entry: use its bundle meta.
+  if (!ce && ins && ins.meta) {
+    var lm = ins.meta;
+    return {
+      id: id,
+      name: lm.name || id,
+      description: lm.description || '',
+      homepage: lm.homepage || '',
+      docs: '',
+      email: '',
+      author: lm.author || '',
+      copyright: '',
+      version: (ins && ins.version) || null
+    };
+  }
   return buildAppMeta(ce, ins && ins.version, man);
 }
 
@@ -392,6 +407,15 @@ function buildAppsSubmenu() {
       label: 'Manage Apps\u2026' + (updates ? '  (' + updates + (updates > 1 ? ' updates' : ' update') + ')' : ''),
       accelerator: 'CmdOrCtrl+Shift+M',
       click: function () { openManagerFromMenu(updates ? 'updates' : 'installed'); }
+    });
+    sub.push({ type: 'separator' });
+    sub.push({
+      label: 'Install from bundle\u2026',
+      click: function () {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('store-command', { cmd: 'install_bundle' });
+        }
+      }
     });
   } else {
     sub.push({
@@ -1019,6 +1043,8 @@ function createWindow() {
       userDataDir: app.getPath('userData'),
       catalogUrl: 'https://fentouxungui.github.io/ShinyApps/catalog.json',
       startBackend: storeStartBackend,
+      shellVersion: '{{{app_version_js}}}',
+      shellRVersion: SHELL_R_VERSION,
       log: function (m) { log('info', '[store]', m); }
     });
     ipcMain.handle('store-list', async () => {
@@ -1029,7 +1055,7 @@ function createWindow() {
       createMenu();   // keep the Apps menu (update count / Quick Run) fresh
       {{/menu_enabled}}
       const plat = platformKey();
-      return cat.apps.map((a) => {
+      const list = cat.apps.map((a) => {
         const ins = st.apps[a.id];
         // Only a platform with a published bundle can be installed/updated here.
         const art = a.artifacts && a.artifacts[plat];
@@ -1054,6 +1080,28 @@ function createWindow() {
           state: ins ? 'installed' : 'not-installed'
         };
       });
+      // Append sideloaded apps: installed ids that are not in the catalog.
+      const catIds = {};
+      cat.apps.forEach((a) => { catIds[a.id] = true; });
+      Object.keys(st.apps).forEach((id) => {
+        if (catIds[id]) return;
+        const lins = st.apps[id];
+        const lm = (lins && lins.meta) || {};
+        list.push({
+          id: id, name: lm.name || id, description: lm.description || '', icon: '', author: lm.author || '',
+          homepage: lm.homepage || '',
+          catalogVersion: (lins && lins.version) || null,
+          installed: true, installedVersion: (lins && lins.version) || null,
+          updateAvailable: false,
+          running: appStore.isRunning(id),
+          tags: [], available: true, size: 0,
+          license: lm.license || '', rVersion: lm.rVersion || '',
+          minShellVersion: '', incompatible: false,
+          local: true,
+          state: 'installed'
+        });
+      });
+      return list;
     });
   }
 
@@ -1377,6 +1425,56 @@ function createWindow() {
       }
       {{#menu_enabled}}
       createMenu();   // refresh Quick Run after install / uninstall / update
+      {{/menu_enabled}}
+
+    } else if (actionType === 'install_bundle') {
+      if (!appStore) return;
+      const { dialog } = require('electron');
+      let bundlePath = action.path;
+      if (!bundlePath) {
+        const res = await dialog.showOpenDialog(mainWindow, {
+          title: 'Install app bundle',
+          properties: ['openFile'],
+          filters: [{ name: 'ShinyApps bundle', extensions: ['zip', 'bundle'] }]
+        });
+        if (res.canceled || !res.filePaths.length) return;
+        bundlePath = res.filePaths[0];
+      }
+      const sendBundle = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: '__bundle__' }, ev)); };
+      if (storeBusy) { sendBundle({ state: 'busy', message: 'Another operation is in progress; please wait until it finishes.' }); return; }
+      storeBusy = true;
+      try {
+        sendBundle({ state: 'installing', statusText: 'reading bundle\u2026' });
+        const confirmBundle = async function (m) {
+          const detail = [
+            'Platform: ' + m.platform,
+            m.r_version ? 'Requires R ' + m.r_version : '',
+            m.author ? 'Author: ' + m.author : '',
+            m.license ? 'License: ' + m.license : '',
+            '',
+            'This bundle is NOT from the ShinyApps catalog.',
+            'Install only if you trust its source.'
+          ].filter(Boolean).join('\n');
+          const r = await dialog.showMessageBox(mainWindow, {
+            type: 'warning', noLink: true,
+            title: 'Install app bundle',
+            message: 'Install ' + (m.name || m.id) + ' ' + m.version + '?',
+            detail: detail,
+            buttons: ['Install', 'Cancel'], defaultId: 1, cancelId: 1
+          });
+          return r.response === 0;
+        };
+        const onProg = function (pp) { sendBundle({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
+        await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
+        sendBundle({ state: 'done', op: 'install_bundle' });
+      } catch (e) {
+        if (!(e && e.cancelled)) sendBundle({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
+        else sendBundle({ state: 'done' });
+      } finally {
+        storeBusy = false;
+      }
+      {{#menu_enabled}}
+      createMenu();
       {{/menu_enabled}}
 
     } else if (actionType === 'run_app') {

@@ -10,6 +10,7 @@ const { workerData, parentPort } = require('worker_threads');
 
 function run() {
   const { zipPath, destDir } = workerData;
+  const limits = workerData.limits || {};
   const fd = fs.openSync(zipPath, 'r');
   try {
     const size = fs.fstatSync(fd).size;
@@ -55,6 +56,9 @@ function run() {
     const list = [];
     let p = 0;
     let totalBytes = 0;
+    const maxEntries = limits.maxEntries || 0;
+    const maxTotal = limits.maxTotalBytes || 0;
+    const maxEntry = limits.maxEntryBytes || 0;
     for (let i = 0; i < entries; i++) {
       if (cd.readUInt32LE(p) !== 0x02014b50) throw new Error('bad central directory record');
       const method = cd.readUInt16LE(p + 10);
@@ -83,9 +87,15 @@ function run() {
       }
       p += 46 + nameLen + extraLen + commentLen;
       const isDir = name.endsWith('/');
-      if (!isDir) totalBytes += uncompSize;
+      if (!isDir) {
+        if (maxEntry > 0 && uncompSize > maxEntry) throw new Error('bundle entry too large: ' + name);
+        totalBytes += uncompSize;
+      }
       list.push({ name, method, compSize, lho, isDir });
     }
+
+    if (maxEntries > 0 && list.length > maxEntries) throw new Error('bundle has too many entries (' + list.length + ')');
+    if (maxTotal > 0 && totalBytes > maxTotal) throw new Error('bundle expands to too much data (' + Math.round(totalBytes / 1048576) + ' MB)');
 
     const total = list.length;
     let processed = 0;

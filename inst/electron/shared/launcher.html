@@ -174,6 +174,8 @@
     }
     .busybar { max-width: 100%; margin: 0 auto 12px; background: #dbeafe; color: #1e3a8a; border: 1px solid #bfdbfe; border-radius: 10px; padding: 10px 14px; font-size: 13px; display: flex; align-items: center; gap: 10px; }
     @media (prefers-color-scheme: dark) { .busybar { background: #1e3a8a; color: #bfdbfe; border-color: #1e40af; } }
+    .pill.local { background: #e0e7ff; color: #3730a3; }
+    @media (prefers-color-scheme: dark) { .pill.local { background: #312e81; color: #c7d2fe; } }
   </style>
 </head>
 <body>
@@ -203,6 +205,7 @@
     <input id="search" class="search" type="search" aria-label="Search apps" placeholder="Search by name, description or author (Ctrl+F)">
     <select id="tag-filter" class="tag-select" aria-label="Filter by tag" hidden></select>
     <button id="clear-filters" class="link-btn" type="button" hidden>Clear</button>
+    <button id="install-bundle-btn" class="btn" type="button">Install from file&#8230;</button>
     <span id="result-count" class="result-count"></span>
   </div>
 
@@ -254,7 +257,9 @@
     function installedList() { return model.filter(function (a) { return a.installed; }); }
     function updatesList() { return model.filter(function (a) { return a.installed && a.updateAvailable; }); }
     function runningList() { return model.filter(function (a) { return a.running; }); }
-    function anyInstalling() { return model.some(function (a) { return a.state === 'installing'; }); }
+    var bundleBusy = false;
+    var bundleStatus = '';
+    function anyInstalling() { return bundleBusy || model.some(function (a) { return a.state === 'installing'; }); }
 
     function sortByName(list) {
       return list.slice().sort(function (a, b) {
@@ -367,6 +372,14 @@
         row.appendChild(link);
       }
       return row;
+    }
+
+    function makeLocalPill() {
+      var p = document.createElement('span');
+      p.className = 'pill local';
+      p.textContent = 'Local';
+      p.title = 'Installed from a local bundle (not from the catalog)';
+      return p;
     }
 
     function installBlockedReason(app) {
@@ -532,6 +545,7 @@
       var meta = makeMeta(app);
       if (meta) card.appendChild(meta);
       card.appendChild(makeStatusPill(app));
+      if (app.local) card.appendChild(makeLocalPill());
       appendStatus(card, app);
       card.appendChild(makeActions(app));
       return card;
@@ -555,6 +569,7 @@
       var meta = makeMeta(app);
       if (meta) main.appendChild(meta);
       main.appendChild(makeStatusPill(app));
+      if (app.local) main.appendChild(makeLocalPill());
       appendStatus(main, app);
       row.appendChild(main);
       row.appendChild(makeActions(app));
@@ -606,7 +621,9 @@
       busybar.hidden = !busy;
       if (busy) {
         var ba = model.filter(function (a) { return a.state === 'installing'; })[0];
-        busybar.textContent = 'Installing ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks.';
+        busybar.textContent = bundleBusy
+          ? ('Installing from bundle \u2014 ' + (bundleStatus || 'please wait') + ' \u2014 do not start other tasks.')
+          : ('Installing ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks.');
       }
 
       if (loading && model.length === 0) {
@@ -860,6 +877,15 @@
       document.getElementById('tag-filter').value = '';
       render();
     });
+    document.getElementById('install-bundle-btn').addEventListener('click', function () {
+      if (window.lifecycle && window.lifecycle.installFromFile) window.lifecycle.installFromFile();
+    });
+    window.addEventListener('dragover', function (ev) { ev.preventDefault(); });
+    window.addEventListener('drop', function (ev) {
+      ev.preventDefault();
+      var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if (f && f.path && window.lifecycle && window.lifecycle.installFromFile) window.lifecycle.installFromFile(f.path);
+    });
     document.addEventListener('keydown', function (ev) {
       if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'f' || ev.key === 'F')) {
         ev.preventDefault();
@@ -894,6 +920,8 @@
         if (cmd.cmd === 'open_manager') {
           if (cmd.tab && ['installed', 'all', 'updates', 'running'].indexOf(cmd.tab) !== -1) tab = cmd.tab;
           if (view === 'manager') render(); else setView('manager');
+        } else if (cmd.cmd === 'install_bundle') {
+          if (window.lifecycle.installFromFile) window.lifecycle.installFromFile();
         } else if (cmd.cmd === 'run' && cmd.appId && window.lifecycle.runApp) {
           window.lifecycle.runApp(cmd.appId);
         }
@@ -915,6 +943,16 @@
       window.lifecycle.onStoreStatus(function (ev) {
         if (ev.state === 'busy') {
           showToast(ev.message || 'Another operation is in progress; please wait.', 'error');
+          return;
+        }
+        if (ev.id === '__bundle__') {
+          if (ev.state === 'installing') { bundleBusy = true; bundleStatus = ev.statusText || ev.step || ''; render(); return; }
+          bundleBusy = false;
+          bundleStatus = '';
+          render();
+          if (ev.state === 'error') showToast('Bundle install failed' + (ev.error ? ': ' + ev.error : ''), 'error');
+          else showToast('Bundle installed', 'success');
+          refresh();
           return;
         }
         var app = byId[ev.id];

@@ -124,7 +124,7 @@ function unzip(zipPath, destDir, onProgress = () => {}) {
     workerPath = workerPath.replace('app.asar', 'app.asar.unpacked');
     let worker;
     try {
-      worker = new Worker(workerPath, { workerData: { zipPath, destDir } });
+      worker = new Worker(workerPath, { workerData: { zipPath, destDir, limits: ZIP_LIMITS } });
     } catch (e) {
       reject(e);
       return;
@@ -172,8 +172,57 @@ function platformKey() {
   return `linux-${a}`;
 }
 
+// Bundle safety limits (zip-bomb / disk-exhaustion guards).
+const ZIP_LIMITS = {
+  maxEntries: 500000,
+  maxTotalBytes: 20 * 1024 * 1024 * 1024,
+  maxEntryBytes: 8 * 1024 * 1024 * 1024,
+};
+
+// Compact metadata persisted with every install so a sideloaded (non-catalog)
+// app can still show its name/homepage/etc. without a catalog entry.
+function bundleMeta(m) {
+  return {
+    name: m.name || m.id,
+    description: m.description || '',
+    homepage: m.homepage || '',
+    author: m.author || '',
+    license: m.license || '',
+    rVersion: m.r_version || '',
+    runtime: m.runtime || '',
+    entry: m.entry || '',
+  };
+}
+
+const ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+const BUNDLE_PLATFORMS = ['win-x64', 'win-arm64', 'mac-x64', 'mac-arm64', 'linux-x64'];
+
+function validateManifest(m) {
+  const bad = (msg) => { const e = new Error('invalid manifest: ' + msg); e.step = 'install'; return e; };
+  if (!m || typeof m !== 'object') throw bad('not an object');
+  if (m.schema !== 1) throw bad('unsupported schema ' + m.schema);
+  if (typeof m.id !== 'string' || !ID_RE.test(m.id)) throw bad('bad id');
+  if (typeof m.name !== 'string' || !m.name) throw bad('missing name');
+  if (typeof m.version !== 'string' || !m.version) throw bad('missing version');
+  if (BUNDLE_PLATFORMS.indexOf(m.platform) === -1) throw bad('bad platform');
+  if (typeof m.entry !== 'string' || !m.entry) throw bad('missing entry');
+  if (!Array.isArray(m.packages)) throw bad('packages must be an array');
+  for (const p of m.packages) {
+    if (!p || typeof p.name !== 'string' || typeof p.version !== 'string' || typeof p.path !== 'string') {
+      throw bad('bad package entry');
+    }
+  }
+}
+
+function assertInside(root, rel) {
+  const target = path.resolve(root, rel || '');
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    const e = new Error('manifest path escapes bundle: ' + rel); e.step = 'install'; throw e;
+  }
+}
+
 function createAppStore(options) {
-  const { userDataDir, catalogUrl, startBackend, log = () => {} } = options;
+  const { userDataDir, catalogUrl, startBackend, shellVersion = '', shellRVersion = '', log = () => {} } = options;
 
   const statePath = path.join(userDataDir, 'state.json');
   const appsDir = path.join(userDataDir, 'apps');
@@ -278,6 +327,8 @@ function createAppStore(options) {
       state.apps[id] = {
         version: manifest.version, platform: plat, dir: finalDir,
         packages: (manifest.packages || []).map((p) => p.name),
+        source: 'catalog',
+        meta: bundleMeta(manifest),
       };
       saveState();
       log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
@@ -286,6 +337,87 @@ function createAppStore(options) {
       await fsp.rm(zip, { force: true }).catch(() => {});
       return { id, version: manifest.version };
     } catch (e) {
+      if (e && !e.step) e.step = step;
+      throw e;
+    }
+  }
+
+  // Install an app from a user-supplied bundle (zip) that need not be in the
+  // catalog. Validates the manifest and compatibility before touching state.
+  async function installFromFile(zipPath, opts = {}) {
+    const onProgress = opts.onProgress || (() => {});
+    const confirm = opts.confirm || (async () => true);
+    const plat = platformKey();
+    let step = 'resolve';
+    let staging = null;
+    try {
+      if (!zipPath || !fs.existsSync(zipPath) || !fs.statSync(zipPath).isFile()) {
+        const e = new Error('bundle file not found'); e.step = 'resolve'; throw e;
+      }
+
+      step = 'download';
+      const zipSize = fs.statSync(zipPath).size;
+      const free = await freeBytes(appsDir);
+      if (free != null && zipSize && free < zipSize * 3) {
+        const e = new Error(`not enough disk space (need ~${Math.ceil((zipSize * 3) / 1048576)} MB free, have ${Math.floor(free / 1048576)} MB)`);
+        e.step = 'download'; e.code = 'NO_SPACE'; throw e;
+      }
+
+      step = 'verify';
+      onProgress({ phase: 'verifying', percent: 100, statusText: 'hashing bundle' });
+      const sha = await sha256File(zipPath);
+
+      step = 'install';
+      staging = path.join(appsDir, '.incoming-' + Date.now());
+      await fsp.rm(staging, { recursive: true, force: true });
+      onProgress({ phase: 'unpacking', percent: 0, statusText: 'unpacking' });
+      await unzip(zipPath, staging, onProgress);
+
+      const manPath = path.join(staging, 'manifest.json');
+      if (!fs.existsSync(manPath)) { const e = new Error('bundle has no manifest.json'); e.step = 'install'; throw e; }
+      let manifest;
+      try { manifest = JSON.parse(fs.readFileSync(manPath, 'utf8')); }
+      catch (err) { const e = new Error('invalid manifest.json: ' + err.message); e.step = 'install'; throw e; }
+      validateManifest(manifest);
+      if (manifest.platform !== plat) {
+        const e = new Error(`bundle is for ${manifest.platform}; this machine is ${plat}`); e.step = 'install'; throw e;
+      }
+      if (shellRVersion && manifest.r_version && cmpVersion(shellRVersion, manifest.r_version) < 0) {
+        const e = new Error(`bundle needs R ${manifest.r_version}; this build ships R ${shellRVersion}`); e.step = 'install'; throw e;
+      }
+      if (shellVersion && manifest.min_shell_version && cmpVersion(shellVersion, manifest.min_shell_version) < 0) {
+        const e = new Error(`bundle needs a newer ShinyApps (${manifest.min_shell_version}); you have ${shellVersion}`); e.step = 'install'; throw e;
+      }
+      const root = path.resolve(staging);
+      assertInside(root, manifest.entry);
+      for (const pkg of (manifest.packages || [])) assertInside(root, pkg.path);
+
+      const ok = await confirm(manifest);
+      if (!ok) { const e = new Error('cancelled'); e.step = 'confirm'; e.cancelled = true; throw e; }
+
+      const id = manifest.id;
+      const finalDir = path.join(appsDir, id, manifest.version);
+      await fsp.mkdir(path.dirname(finalDir), { recursive: true });
+      await fsp.rm(finalDir, { recursive: true, force: true });
+      await fsp.rename(staging, finalDir);
+      staging = null;
+
+      onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
+      await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+
+      state.apps[id] = {
+        version: manifest.version, platform: plat, dir: finalDir,
+        packages: (manifest.packages || []).map((p) => p.name),
+        source: 'local',
+        sha256: sha,
+        meta: bundleMeta(manifest),
+      };
+      saveState();
+      log(`installed local bundle ${id}@${manifest.version}`);
+      onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
+      return { id, version: manifest.version };
+    } catch (e) {
+      if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
       if (e && !e.step) e.step = step;
       throw e;
     }
@@ -383,7 +515,7 @@ function createAppStore(options) {
 
   return {
     fetchCatalog, catalogEntry,
-    install, uninstall, run, stop, stopAll,
+    install, installFromFile, uninstall, run, stop, stopAll,
     checkUpdates, update,
     isRunning: (id) => running.has(id),
     forget,

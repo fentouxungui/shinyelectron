@@ -28,5 +28,6 @@ contextBridge.exposeInMainWorld('lifecycle', {
   runApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'run_app', appId }),
   stopApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'stop_app', appId }),
   openApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'open_app', appId }),
+  installFromFile: (path) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', path }),
   openExternal: (url) => ipcRenderer.invoke('open-external', url)
 });
