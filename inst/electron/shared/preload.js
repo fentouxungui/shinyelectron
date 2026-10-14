@@ -1,5 +1,5 @@
 // Secure IPC bridge for lifecycle.html and launcher.html
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('lifecycle', {
   // lifecycle page
@@ -29,5 +29,6 @@ contextBridge.exposeInMainWorld('lifecycle', {
   stopApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'stop_app', appId }),
   openApp: (appId) => ipcRenderer.send('lifecycle-action', { type: 'open_app', appId }),
   installFromFile: (path) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', path }),
-  openExternal: (url) => ipcRenderer.invoke('open-external', url)
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  getPathForFile: (file) => webUtils.getPathForFile(file)
 });

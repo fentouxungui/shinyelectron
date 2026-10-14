@@ -1129,7 +1129,7 @@ function createWindow() {
           tags: [], available: true, size: 0,
           license: lm.license || '', rVersion: lm.rVersion || '',
           minShellVersion: '', incompatible: false,
-          local: (lins && lins.source) !== 'catalog',
+          local: !!(lins && lins.source === 'local'),
           state: 'installed'
         });
       });
