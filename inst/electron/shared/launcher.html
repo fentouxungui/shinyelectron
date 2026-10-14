@@ -1012,7 +1012,7 @@
         if (ev.state === 'error') {
           showToast('Failed to ' + opAction(ev.op) + ' ' + nm + (ev.step ? ' (' + ev.step + ')' : ''), 'error');
         }
-        if (ev.op || ev.state === 'error') refresh();
+        if ((ev.state === 'done' && ev.op) || ev.state === 'error') refresh();
       });
     }
 

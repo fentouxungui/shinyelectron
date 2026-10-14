@@ -1441,7 +1441,15 @@ function createWindow() {
         sendStore({ state: 'busy', message: 'Another operation is in progress; please wait until it finishes.' });
         return;
       }
-      var storeProg = function (pp) { sendStore({ state: 'installing', op: actionType, percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
+      var lastProgAt = 0;
+      var lastProgPhase = '';
+      var storeProg = function (pp) {
+        var now = Date.now();
+        if (pp.phase === lastProgPhase && now - lastProgAt < 100) return;
+        lastProgAt = now;
+        lastProgPhase = pp.phase;
+        sendStore({ state: 'installing', op: actionType, percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
+      };
       var storeJob = actionType === 'install_app'
         ? function () { return appStore.install(storeId, storeProg); }
         : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId, storeProg); };
@@ -1497,7 +1505,15 @@ function createWindow() {
           });
           return r.response === 0;
         };
-        const onProg = function (pp) { sendBundle({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
+        let lastProgAt = 0;
+        let lastProgPhase = '';
+        const onProg = function (pp) {
+          const now = Date.now();
+          if (pp.phase === lastProgPhase && now - lastProgAt < 100) return;
+          lastProgAt = now;
+          lastProgPhase = pp.phase;
+          sendBundle({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
+        };
         await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
         sendBundle({ state: 'done', op: 'install_bundle' });
       } catch (e) {
