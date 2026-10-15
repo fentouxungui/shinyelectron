@@ -255,16 +255,19 @@
     // Favorites / recently used / sort (persisted; purely client-side).
     var favorites = [];
     var recent = [];
+    var usage = {};           // { appId: runCount }
     var sortMode = 'name';    // 'name' | 'recent'
     var favOnly = false;
     try {
       favorites = JSON.parse(localStorage.getItem('shinyapps.favorites') || '[]');
       recent = JSON.parse(localStorage.getItem('shinyapps.recent') || '[]');
+      usage = JSON.parse(localStorage.getItem('shinyapps.usage') || '{}');
       var savedSort = localStorage.getItem('shinyapps.sort');
       if (savedSort === 'name' || savedSort === 'recent') sortMode = savedSort;
     } catch (e) {}
     if (!Array.isArray(favorites)) favorites = [];
     if (!Array.isArray(recent)) recent = [];
+    if (!usage || typeof usage !== 'object') usage = {};
     function isFav(id) { return favorites.indexOf(id) !== -1; }
     function saveFavs() { try { localStorage.setItem('shinyapps.favorites', JSON.stringify(favorites)); } catch (e) {} }
     function saveRecent() { try { localStorage.setItem('shinyapps.recent', JSON.stringify(recent)); } catch (e) {} }
@@ -272,6 +275,11 @@
       var i = favorites.indexOf(id);
       if (i === -1) favorites.push(id); else favorites.splice(i, 1);
       saveFavs(); render();
+      pushQuickRunOrder();
+    }
+    function bumpUsage(id) {
+      usage[id] = (usage[id] || 0) + 1;
+      try { localStorage.setItem('shinyapps.usage', JSON.stringify(usage)); } catch (e) {}
     }
     function markRecent(id) {
       var i = recent.indexOf(id);
@@ -279,6 +287,26 @@
       recent.unshift(id);
       if (recent.length > 20) recent.length = 20;
       saveRecent();
+      bumpUsage(id);
+      pushQuickRunOrder();
+    }
+    // Push the Quick Run ordering (favorites -> usage -> recent -> name) to the
+    // main process, which builds the native Apps > Quick Run menu.
+    function pushQuickRunOrder() {
+      if (!window.lifecycle || !window.lifecycle.setQuickRunOrder) return;
+      var installed = model.filter(function (a) { return a.installed; });
+      var ordered = installed.slice().sort(function (a, b) {
+        var fa = isFav(a.id) ? 1 : 0, fb = isFav(b.id) ? 1 : 0;
+        if (fa !== fb) return fb - fa;
+        var ua = usage[a.id] || 0, ub = usage[b.id] || 0;
+        if (ua !== ub) return ub - ua;
+        var ra = recent.indexOf(a.id), rb = recent.indexOf(b.id);
+        if (ra === -1 && rb === -1) return String(a.name || a.id).localeCompare(String(b.name || b.id));
+        if (ra === -1) return 1;
+        if (rb === -1) return -1;
+        return ra - rb;
+      });
+      window.lifecycle.setQuickRunOrder({ order: ordered.map(function (a) { return a.id; }), favorites: favorites.slice() });
     }
     function setSortMode(m) {
       if (m !== 'name' && m !== 'recent') return;
@@ -597,6 +625,13 @@
           onClick: function () { if (window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage); }
         });
       }
+      items.push({ label: 'Open app folder', onClick: function () {
+        if (window.lifecycle && window.lifecycle.openAppFolder) {
+          window.lifecycle.openAppFolder(app.id).then(function (ok) {
+            if (!ok) showToast('Could not open the app folder', 'error');
+          }).catch(function () { showToast('Could not open the app folder', 'error'); });
+        }
+      } });
       items.push({ label: 'View log', onClick: function () { if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog(app.id); } });
       items.push({ label: 'Copy diagnostics', onClick: function () {
         if (window.lifecycle && window.lifecycle.copyDiagnostics) {
@@ -1197,6 +1232,7 @@
         loading = false;
         rebuildTagFilter();
         render();
+        pushQuickRunOrder();
       }
     }
 

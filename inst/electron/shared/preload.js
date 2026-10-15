@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('lifecycle', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   openAppLog: (appId) => ipcRenderer.invoke('open-app-log', appId),
+  openAppFolder: (appId) => ipcRenderer.invoke('open-app-folder', appId),
   cancelInstall: () => ipcRenderer.send('lifecycle-action', { type: 'cancel_store' }),
   copyDiagnostics: (appId) => ipcRenderer.invoke('copy-diagnostics', appId),
   getUsage: () => ipcRenderer.invoke('store-usage'),
@@ -41,5 +42,6 @@ contextBridge.exposeInMainWorld('lifecycle', {
   setCatalogUrl: (url) => ipcRenderer.invoke('set-catalog-url', url),
   setCrashReporting: (on) => ipcRenderer.invoke('set-crash-reporting', on),
   installFromUrl: (url) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', url }),
-  changeDataRoot: () => ipcRenderer.invoke('change-data-root')
+  changeDataRoot: () => ipcRenderer.invoke('change-data-root'),
+  setQuickRunOrder: (data) => ipcRenderer.send('quick-run-order', data)
 });

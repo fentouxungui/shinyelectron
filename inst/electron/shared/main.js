@@ -351,6 +351,9 @@ var storeAppUrls = {};
 let storeBusy = false;
 let storeController = null;
 const storeQueue = [];
+// Quick Run ordering pushed by the launcher (favorites -> usage -> recent).
+let quickRunOrder = [];
+let quickRunFavorites = {};
 
 async function runStoreAction(actionType, storeId) {
   const sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
@@ -683,9 +686,19 @@ function installedAppMenuItems() {
   try { st = appStore.getState(); } catch (e) { return items; }
   Object.keys(st.apps || {}).forEach(function (id) {
     var m = appMetaFor(id) || {};
-    items.push({ id: id, label: m.name || id });
+    var label = m.name || id;
+    if (quickRunFavorites[id]) label = '\u2605 ' + label;
+    items.push({ id: id, label: label });
   });
-  items.sort(function (a, b) { return a.label.localeCompare(b.label); });
+  // Order by the launcher-computed Quick Run rank; unknown ids last, by name.
+  var rank = {};
+  for (var i = 0; i < quickRunOrder.length; i++) rank[quickRunOrder[i]] = i;
+  items.sort(function (a, b) {
+    var ra = Object.prototype.hasOwnProperty.call(rank, a.id) ? rank[a.id] : 1e9;
+    var rb = Object.prototype.hasOwnProperty.call(rank, b.id) ? rank[b.id] : 1e9;
+    if (ra !== rb) return ra - rb;
+    return a.label.localeCompare(b.label);
+  });
   return items;
 }
 
@@ -1621,6 +1634,30 @@ function createWindow() {
     app.relaunch();
     app.exit(0);
     return { ok: true };
+  });
+
+  ipcMain.on('quick-run-order', (_event, data) => {
+    if (data && Array.isArray(data.order)) quickRunOrder = data.order;
+    quickRunFavorites = {};
+    if (data && Array.isArray(data.favorites)) { for (const f of data.favorites) quickRunFavorites[f] = true; }
+    {{#menu_enabled}}
+    createMenu();
+    {{/menu_enabled}}
+  });
+
+  ipcMain.handle('open-app-folder', async (_event, appId) => {
+    try {
+      if (!appStore || !appId) return false;
+      const ins = appStore.getState().apps[appId];
+      if (!ins || !ins.dir) return false;
+      const entry = (ins.meta && ins.meta.entry) || 'app/app.R';
+      const dir = path.join(ins.dir, path.dirname(entry) || 'app');
+      await shell.openPath(dir);
+      return true;
+    } catch (e) {
+      log('warn', 'open-app-folder failed:', e && e.message);
+      return false;
+    }
   });
 
   ipcMain.handle('open-app-log', async (_event, appId) => {
