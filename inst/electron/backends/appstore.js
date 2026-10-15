@@ -242,14 +242,18 @@ function assertInside(root, rel) {
 }
 
 function createAppStore(options) {
-  const { userDataDir, startBackend, shellVersion = '', shellRVersion = '', log = () => {} } = options;
+  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {} } = options;
+  // Data root holds the installed apps + libraries. Defaults to the Electron
+  // userData dir for backward compatibility; the shell passes an explicit,
+  // user-configurable dataRoot (e.g. %LOCALAPPDATA%\ShinyApps).
+  const dataRoot = options.dataRoot || options.userDataDir;
   let catalogUrl = options.catalogUrl;
 
-  const statePath = path.join(userDataDir, 'state.json');
-  const appsDir = path.join(userDataDir, 'apps');
-  const sharedLib = path.join(userDataDir, 'lib');
-  const privateRoot = path.join(userDataDir, 'private');
-  const cacheDir = path.join(userDataDir, 'store-cache');
+  const statePath = path.join(dataRoot, 'state.json');
+  const appsDir = path.join(dataRoot, 'apps');
+  const sharedLib = path.join(dataRoot, 'lib');
+  const privateRoot = path.join(dataRoot, 'private');
+  const cacheDir = path.join(dataRoot, 'store-cache');
   for (const d of [appsDir, sharedLib, privateRoot, cacheDir]) fs.mkdirSync(d, { recursive: true });
 
   let state = loadState();
@@ -678,6 +682,19 @@ function createAppStore(options) {
     return { freed: freed };
   }
 
+  // Reset all local store data: stop/cancel everything, remove installed apps,
+  // the shared/private libraries and the download cache, and clear state.
+  // The shell itself and user settings are untouched.
+  async function resetLocal() {
+    await stopAll();
+    for (const d of [appsDir, sharedLib, privateRoot, cacheDir]) {
+      try { await fsp.rm(d, { recursive: true, force: true }); } catch (e) {}
+      try { fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+    }
+    state = { schema: 1, apps: {}, shared: {} };
+    saveState();
+  }
+
   return {
     fetchCatalog, catalogEntry,
     install, installFromFile, uninstall, run, stop, stopAll,
@@ -687,7 +704,7 @@ function createAppStore(options) {
     getState: () => state,
     getCatalog: () => catalog,
     setCatalogUrl, installFromUrl,
-    usage, cleanup,
+    usage, cleanup, resetLocal,
     getDiskFree: () => freeBytes(appsDir),
   };
 }

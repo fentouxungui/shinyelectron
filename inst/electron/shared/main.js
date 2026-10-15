@@ -14,6 +14,7 @@ process.on('uncaughtException', (err) => {
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const fsp = fs.promises;
 const backend = require('./backends/{{backend_module}}');
 const { createAppStore, cmpVersion, platformKey } = require('./backends/appstore');
 
@@ -112,6 +113,55 @@ let appSettings = {};
 try { appSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) || {}; } catch (e) { appSettings = {}; }
 function saveSettings() { try { fs.writeFileSync(settingsPath, JSON.stringify(appSettings, null, 2)); } catch (e) { /* best effort */ } }
 
+// ---- App data location (installed apps + libraries) -----------------------
+// Default is a NON-roaming per-user folder so large app bundles are not synced
+// by OneDrive / roaming profiles. Users can point it at another drive from
+// Settings; the choice is remembered in settings.json (survives a normal
+// reinstall, since uninstall does not delete userData).
+const DEFAULT_DATA_ROOT = process.platform === 'win32'
+  ? path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'ShinyApps')
+  : app.getPath('userData');
+function hasStoreData(dir) {
+  try {
+    if (fs.existsSync(path.join(dir, 'state.json'))) return true;
+    const apps = path.join(dir, 'apps');
+    if (fs.existsSync(apps) && fs.readdirSync(apps).length > 0) return true;
+  } catch (e) {}
+  return false;
+}
+function resolveDataRoot() {
+  let root;
+  if (appSettings.dataRoot) {
+    root = appSettings.dataRoot;
+  } else if (hasStoreData(app.getPath('userData'))) {
+    // Existing install: keep the legacy (%APPDATA%) location so its apps stay
+    // visible; the user can relocate it from Settings.
+    root = app.getPath('userData');
+  } else {
+    root = DEFAULT_DATA_ROOT;
+  }
+  try { fs.mkdirSync(root, { recursive: true }); } catch (e) {}
+  return root;
+}
+// Marker inside the data root recording the shell/R versions that created it,
+// so a future shell can warn when the R ABI may differ.
+function writeRootMarker() {
+  try {
+    const root = resolveDataRoot();
+    const marker = path.join(root, 'root.json');
+    let prev = null;
+    try { prev = JSON.parse(fs.readFileSync(marker, 'utf8')); } catch (e) {}
+    fs.writeFileSync(marker, JSON.stringify({
+      schema: 1, app: 'ShinyApps',
+      shellVersion: app.getVersion(), rVersion: SHELL_R_VERSION || '',
+      updatedAt: new Date().toISOString()
+    }, null, 2));
+    if (prev && prev.rVersion && SHELL_R_VERSION && prev.rVersion !== SHELL_R_VERSION) {
+      log('warn', 'data root was built with R ' + prev.rVersion + ' but this shell ships R ' + SHELL_R_VERSION + '; installed apps may need reinstalling');
+    }
+  } catch (e) { log('warn', 'root marker failed:', e && e.message); }
+}
+
 // Local-only crash capture (opt-in). Uncaught main-process errors are written
 // to <logDir>/crashes/. Nothing is ever uploaded.
 let crashHandlersInstalled = false;
@@ -139,6 +189,109 @@ function installCrashHandlers() {
   };
   process.on('uncaughtException', (err) => { writeCrash('uncaughtException', err); log('error', 'uncaughtException:', (err && err.stack) || err); });
   process.on('unhandledRejection', (reason) => { writeCrash('unhandledRejection', reason); });
+}
+
+// ---- Uninstall / reset ----------------------------------------------------
+function fmtBytes(bytes) {
+  if (!bytes || bytes <= 0) return '0 MB';
+  const mb = bytes / 1048576;
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+  if (mb >= 10) return Math.round(mb) + ' MB';
+  return mb.toFixed(1) + ' MB';
+}
+function shellDisplayName() { return '{{{app_name_js}}}'; }
+function closeAllLogs() {
+  try { if (logStream) { logStream.end(); logStream = null; } } catch (e) {}
+  closeAppLog();
+}
+function findUninstaller() {
+  try {
+    const dir = path.dirname(app.getPath('exe'));
+    const hit = fs.readdirSync(dir).find((f) => /^Uninstall.*\.exe$/i.test(f));
+    return hit ? path.join(dir, hit) : null;
+  } catch (e) { return null; }
+}
+// Stop backends, close logs, then remove every local store file (thorough).
+async function wipeAllLocalData() {
+  if (appStore) { try { await appStore.stopAll(); } catch (e) {} }
+  closeAllLogs();
+  const userData = app.getPath('userData');
+  const targets = ['apps', 'lib', 'private', 'store-cache', 'state.json', 'settings.json', 'logs', 'crashes', 'window-state.json'];
+  for (const t of targets) {
+    try { fs.rmSync(path.join(userData, t), { recursive: true, force: true }); } catch (e) {}
+  }
+}
+async function uninstallShinyApps() {
+  const { dialog } = require('electron');
+  const name = shellDisplayName();
+  const first = await dialog.showMessageBox(mainWindow, {
+    type: 'warning', noLink: true,
+    title: 'Uninstall ' + name,
+    message: 'Uninstall ' + name + '?',
+    detail: 'Choose whether to also remove installed applications and all local data.',
+    buttons: ['Uninstall', 'Uninstall and remove all apps & data', 'Cancel'],
+    defaultId: 2, cancelId: 2
+  });
+  if (first.response === 2) return;
+  const thorough = first.response === 1;
+  if (thorough) {
+    let n = 0, bytes = 0, ids = '';
+    if (appStore) {
+      try {
+        const u = await appStore.usage();
+        n = (u.apps || []).length;
+        bytes = u.total || 0;
+        ids = (u.apps || []).map((a) => a.id).join(', ');
+      } catch (e) {}
+    }
+    const second = await dialog.showMessageBox(mainWindow, {
+      type: 'warning', noLink: true,
+      title: 'Remove all apps and data',
+      message: 'Delete all installed applications and local data?',
+      detail: 'This permanently deletes everything under:\n' + app.getPath('userData') +
+        '\n\n' + (n ? ('Installed apps (' + n + '): ' + ids + '\n') : '') +
+        'About ' + fmtBytes(bytes) + ' will be freed.\n\nThis cannot be undone.',
+      buttons: ['Delete and uninstall', 'Cancel'], defaultId: 1, cancelId: 1
+    });
+    if (second.response !== 0) return;
+  }
+  app.isQuitting = true;
+  try {
+    if (thorough) await wipeAllLocalData();
+    else if (appStore) { try { await appStore.stopAll(); } catch (e) {} }
+  } catch (e) { log('warn', 'uninstall cleanup failed:', e && e.message); }
+  const un = findUninstaller();
+  if (un) {
+    const { spawn } = require('child_process');
+    try { const c = spawn(un, [], { detached: true, stdio: 'ignore' }); c.unref(); } catch (e) { log('error', 'uninstaller spawn failed:', e && e.message); }
+    app.quit();
+  } else {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'info', noLink: true,
+      title: 'Uninstall ' + name,
+      message: 'Uninstaller not found',
+      detail: 'This copy was not installed from a release. Remove the app folder manually, or uninstall ' + name + ' from Windows Settings > Apps.'
+    });
+  }
+}
+async function resetLocalData() {
+  const { dialog } = require('electron');
+  const r = await dialog.showMessageBox(mainWindow, {
+    type: 'warning', noLink: true,
+    title: 'Reset local data',
+    message: 'Remove all installed apps, shared packages, caches and logs?',
+    detail: shellDisplayName() + ' stays installed. Your settings (e.g. catalog URL) are kept.',
+    buttons: ['Reset', 'Cancel'], defaultId: 1, cancelId: 1
+  });
+  if (r.response !== 0) return;
+  if (appStore) { try { await appStore.resetLocal(); } catch (e) { log('warn', 'reset failed:', e && e.message); } }
+  closeAllLogs();
+  const userData = app.getPath('userData');
+  for (const t of ['logs', 'crashes']) {
+    try { fs.rmSync(path.join(userData, t), { recursive: true, force: true }); } catch (e) {}
+  }
+  initLogging();   // re-open the shell log we just deleted
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
 }
 
 function log(level, ...args) {
@@ -627,6 +780,8 @@ function createMenu() {
       submenu: [
         { label: 'About ' + appTitle, click: () => { showAboutDialog().catch((err) => log('error', 'About dialog failed:', err)); } },
         { type: 'separator' },
+        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } },
+        { type: 'separator' },
         { role: 'quit', label: 'Quit ' + appTitle }
       ]
     }] : []),
@@ -689,7 +844,10 @@ function createMenu() {
           click: () => {
             showAboutDialog().catch((err) => log('error', 'About dialog failed:', err));
           }
-        }
+        },
+        { type: 'separator' },
+        { label: 'Reset local data\u2026', click: () => { resetLocalData().catch((err) => log('error', 'reset failed:', err)); } },
+        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } }
       ]
     }
   ];
@@ -702,6 +860,8 @@ function createMenu() {
       label: appTitle,
       submenu: [
         { label: 'About ' + appTitle, click: () => { showAboutDialog().catch((err) => log('error', 'About dialog failed:', err)); } },
+        { type: 'separator' },
+        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -803,7 +963,10 @@ function createMenu() {
           click: () => {
             showAboutDialog().catch((err) => log('error', 'About dialog failed:', err));
           }
-        }
+        },
+        { type: 'separator' },
+        { label: 'Reset local data\u2026', click: () => { resetLocalData().catch((err) => log('error', 'reset failed:', err)); } },
+        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } }
       ]
     }
   ];
@@ -1224,7 +1387,7 @@ function createWindow() {
 
   if (appsManifest) {
     appStore = createAppStore({
-      userDataDir: app.getPath('userData'),
+      dataRoot: resolveDataRoot(),
       catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL,
       startBackend: storeStartBackend,
       shellVersion: '{{{app_version_js}}}',
@@ -1367,6 +1530,8 @@ function createWindow() {
     catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL,
     defaultCatalogUrl: DEFAULT_CATALOG_URL,
     crashReporting: !!appSettings.crashReporting,
+    dataRoot: resolveDataRoot(),
+    defaultDataRoot: DEFAULT_DATA_ROOT,
   }));
 
   ipcMain.handle('set-catalog-url', async (_event, url) => {
@@ -1383,6 +1548,79 @@ function createWindow() {
     saveSettings();
     if (appSettings.crashReporting) installCrashHandlers();
     return { ok: true, crashReporting: !!appSettings.crashReporting };
+  });
+
+  ipcMain.handle('change-data-root', async () => {
+    const { dialog } = require('electron');
+    const cur = resolveDataRoot();
+    const pick = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a folder for ShinyApps apps & data',
+      defaultPath: cur,
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (pick.canceled || !pick.filePaths.length) return { ok: false, canceled: true };
+    const target = pick.filePaths[0];
+    if (path.resolve(target) === path.resolve(cur)) return { ok: false, message: 'That is already the current location.' };
+    let existing = false;
+    try {
+      existing = fs.existsSync(path.join(target, 'state.json')) ||
+        (fs.existsSync(path.join(target, 'apps')) && fs.readdirSync(path.join(target, 'apps')).length > 0);
+    } catch (e) {}
+    let migrate = false;
+    if (existing) {
+      const m = await dialog.showMessageBox(mainWindow, {
+        type: 'question', noLink: true,
+        title: 'App data location',
+        message: 'This folder already has ShinyApps data.',
+        detail: target + '\n\nUse the existing apps there, or overwrite them with the data from the current location?',
+        buttons: ['Use existing data', 'Overwrite with current data', 'Cancel'],
+        defaultId: 0, cancelId: 2
+      });
+      if (m.response === 2) return { ok: false, canceled: true };
+      if (m.response === 0) {
+        // Keep the apps already in the target: just repoint and restart.
+        appSettings.dataRoot = target;
+        saveSettings();
+        app.relaunch();
+        app.exit(0);
+        return { ok: true };
+      }
+      migrate = true;
+    } else {
+      const m = await dialog.showMessageBox(mainWindow, {
+        type: 'question', noLink: true,
+        title: 'App data location',
+        message: 'Use this folder for apps and data?',
+        detail: target + '\n\nMove your installed apps and libraries from the current location?',
+        buttons: ['Move existing data', 'Use empty folder', 'Cancel'],
+        defaultId: 0, cancelId: 2
+      });
+      if (m.response === 2) return { ok: false, canceled: true };
+      migrate = m.response === 0;
+    }
+    const sendBusy = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: '__bundle__' }, ev)); };
+    sendBusy({ state: 'installing', statusText: 'Moving data to ' + target + '\u2026' });
+    try {
+      if (appStore) { try { await appStore.stopAll(); } catch (e) {} }
+      await fsp.mkdir(target, { recursive: true });
+      if (migrate) {
+        for (const it of ['apps', 'lib', 'private', 'store-cache', 'state.json']) {
+          const src = path.join(cur, it);
+          if (!fs.existsSync(src)) continue;
+          await fsp.cp(src, path.join(target, it), { recursive: true, force: true });
+        }
+      }
+      appSettings.dataRoot = target;
+      saveSettings();
+    } catch (e) {
+      log('error', 'data root change failed:', e && e.message);
+      sendBusy({ state: 'error', error: (e && e.message) || String(e), message: 'Could not change app data location: ' + ((e && e.message) || e) });
+      return { ok: false, message: (e && e.message) || String(e) };
+    }
+    sendBusy({ state: 'done', message: 'App data location updated. Restarting\u2026' });
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
   });
 
   ipcMain.handle('open-app-log', async (_event, appId) => {
@@ -1928,6 +2166,7 @@ function createWindow() {
 app.whenReady().then(() => {
   initLogging();
   installCrashHandlers();
+  writeRootMarker();
   log('info', 'App starting');
   log('info', 'Version: {{{app_version_js}}}');
   log('info', 'App type: {{app_type}}');

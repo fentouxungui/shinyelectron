@@ -40,5 +40,6 @@ contextBridge.exposeInMainWorld('lifecycle', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   setCatalogUrl: (url) => ipcRenderer.invoke('set-catalog-url', url),
   setCrashReporting: (on) => ipcRenderer.invoke('set-crash-reporting', on),
-  installFromUrl: (url) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', url })
+  installFromUrl: (url) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', url }),
+  changeDataRoot: () => ipcRenderer.invoke('change-data-root')
 });

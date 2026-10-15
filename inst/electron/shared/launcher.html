@@ -1062,6 +1062,25 @@
       }));
       dlg.appendChild(urlRow);
 
+      dlg.appendChild(settingsLabel('App data location'));
+      var drWrap = document.createElement('div');
+      drWrap.className = 'storage-row';
+      var drText = document.createElement('span');
+      drText.className = 'storage-muted';
+      drText.style.wordBreak = 'break-all';
+      drText.textContent = (s && s.dataRoot) || '';
+      drWrap.appendChild(drText);
+      dlg.appendChild(drWrap);
+      var drRow = document.createElement('div');
+      drRow.className = 'dialog-actions';
+      drRow.appendChild(makeButton('Change\u2026', '', function () {
+        if (window.lifecycle && window.lifecycle.changeDataRoot) {
+          closeSettings();
+          window.lifecycle.changeDataRoot();
+        }
+      }));
+      dlg.appendChild(drRow);
+
       var crashWrap = document.createElement('label');
       crashWrap.className = 'storage-row';
       var crashText = document.createElement('span');
@@ -1219,8 +1238,8 @@
           bundleBusy = false;
           bundleStatus = '';
           render();
-          if (ev.state === 'error') showToast('Bundle install failed' + (ev.error ? ': ' + ev.error : ''), 'error');
-          else showToast('Bundle installed', 'success');
+          if (ev.state === 'error') showToast(ev.message || ('Bundle install failed' + (ev.error ? ': ' + ev.error : '')), 'error');
+          else showToast(ev.message || 'Bundle installed', 'success');
           refresh();
           return;
         }
