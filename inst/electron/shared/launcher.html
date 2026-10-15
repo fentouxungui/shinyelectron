@@ -508,6 +508,7 @@
           onClick: function () { if (window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage); }
         });
       }
+      items.push({ label: 'View log', onClick: function () { if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog(app.id); } });
       items.push({ label: 'Uninstall', danger: true, onClick: function () { confirmUninstall(app); } });
       return items;
     }

@@ -191,6 +191,7 @@
       <div class="buttons">
         <button class="btn btn-primary" id="btn-retry">Retry</button>
         <button class="btn btn-secondary" id="btn-quit">Quit</button>
+        <button class="btn btn-secondary" id="btn-open-log">Open log</button>
       </div>
       {{/has_custom_error}}
     </div>
@@ -258,6 +259,10 @@
 
     document.getElementById('btn-retry').addEventListener('click', function() {
       if (window.lifecycle) window.lifecycle.retry();
+    });
+    var openLogBtn = document.getElementById('btn-open-log');
+    if (openLogBtn) openLogBtn.addEventListener('click', function() {
+      if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog();
     });
     document.getElementById('btn-quit').addEventListener('click', function() {
       if (window.lifecycle) window.lifecycle.quit();

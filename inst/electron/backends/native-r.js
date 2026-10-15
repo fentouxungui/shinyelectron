@@ -506,13 +506,16 @@ class NativeRBackend extends EventEmitter {
       let stderr = '';
 
       child.stdout.on('data', (data) => {
-        logDebug(`[R stdout] ${data.toString().trim()}`);
+        const out = data.toString().trim();
+        logDebug(`[R stdout] ${out}`);
+        if (out) this.emit('output', { stream: 'stdout', line: out });
       });
 
       child.stderr.on('data', (data) => {
         const msg = data.toString().trim();
         stderr += msg + '\n';
         logDebug(`[R stderr] ${msg}`);
+        if (msg) this.emit('output', { stream: 'stderr', line: msg });
         if (superseded()) return;
 
         // Surface R's progress as lifecycle status updates so the splash

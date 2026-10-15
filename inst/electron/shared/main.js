@@ -34,6 +34,75 @@ function initLogging() {
   } catch { /* logging is best-effort */ }
 }
 
+// ---- Per-app run logs ------------------------------------------------------
+// One file per app launch at <logDir>/apps/<appId>/run-<timestamp>.log, holding
+// the backend status phases plus the app child's stdout/stderr. The newest
+// APP_LOG_KEEP runs per app are kept; older ones are pruned.
+const appLogRoot = path.join(logDir, 'apps');
+const APP_LOG_MAX_BYTES = 20 * 1024 * 1024;
+const APP_LOG_KEEP = 10;
+let appLogStream = null;
+let appLogPath = null;
+let appLogSize = 0;
+let appLogAppId = null;
+try { fs.mkdirSync(appLogRoot, { recursive: true }); } catch (e) { /* best effort */ }
+
+function safeLogId(id) {
+  return String(id || 'shell').replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+function pruneAppLogs(dir) {
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.log'))
+      .map((f) => { const fp = path.join(dir, f); return { p: fp, t: fs.statSync(fp).mtimeMs }; })
+      .sort((a, b) => b.t - a.t);
+    for (const f of files.slice(APP_LOG_KEEP)) { try { fs.unlinkSync(f.p); } catch (e) {} }
+  } catch (e) { /* best effort */ }
+}
+function openAppLog(appId) {
+  closeAppLog();
+  try {
+    const dir = path.join(appLogRoot, safeLogId(appId));
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    appLogPath = path.join(dir, 'run-' + stamp + '.log');
+    appLogStream = fs.createWriteStream(appLogPath, { flags: 'a' });
+    appLogSize = 0;
+    appLogAppId = appId;
+    pruneAppLogs(dir);
+    appLogWrite('=== ' + appId + ' run started ' + new Date().toISOString() + ' ===');
+  } catch (e) { /* best effort */ }
+}
+function appLogWrite(line) {
+  if (!appLogStream) return;
+  if (appLogSize > APP_LOG_MAX_BYTES) return;
+  const text = '[' + new Date().toISOString() + '] ' + line + '\n';
+  appLogSize += Buffer.byteLength(text);
+  if (appLogSize > APP_LOG_MAX_BYTES) {
+    try { appLogStream.write('[log truncated: exceeded ' + Math.round(APP_LOG_MAX_BYTES / 1048576) + ' MB]\n'); } catch (e) {}
+    return;
+  }
+  try { appLogStream.write(text); } catch (e) {}
+}
+function closeAppLog() {
+  if (appLogStream) { try { appLogStream.end(); } catch (e) {} }
+  appLogStream = null;
+  appLogPath = null;
+  appLogSize = 0;
+  appLogAppId = null;
+}
+function latestAppLog(appId) {
+  const dir = path.join(appLogRoot, safeLogId(appId));
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.endsWith('.log'))
+      .map((f) => path.join(dir, f))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    if (files.length) return files[0];
+  } catch (e) { /* none */ }
+  return null;
+}
+
 function log(level, ...args) {
   if ((LOG_LEVELS[level] || 0) < LOG_THRESHOLD) return;
   const msg = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${args.join(' ')}`;
@@ -524,7 +593,7 @@ function createMenu() {
           label: 'View Logs',
           click: () => {
             const { shell } = require('electron');
-            shell.openPath(logDir);
+            shell.openPath(appLogRoot);
           }
         },
         { type: 'separator' },
@@ -638,7 +707,7 @@ function createMenu() {
           label: 'View Logs',
           click: () => {
             const { shell } = require('electron');
-            shell.openPath(logDir);
+            shell.openPath(appLogRoot);
           }
         },
         { type: 'separator' },
@@ -1018,17 +1087,22 @@ function createWindow() {
         currentBackend.stop();
       }
       currentBackend = getBackendForApp('r-shiny', 'bundled');
+      openAppLog(opts.appId);
       currentBackend.on('status', function (data) {
+        appLogWrite('[' + data.phase + '] ' + (data.message || ''));
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifecycle-status', data);
         if (data.phase === 'server_ready') serverRunning = true;
         if (data.phase === 'stopping_server' || data.phase === 'error' || data.phase === 'server_crashed') serverRunning = false;
       });
+      currentBackend.on('output', function (o) { appLogWrite((o && o.stream ? o.stream : 'out') + ': ' + ((o && o.line) || '')); });
       currentBackend.on('error', function (err) {
+        appLogWrite('[error] ' + (err && err.message ? err.message : err));
         log('error', 'store backend error:', err && err.message ? err.message : err);
       });
       // Clear the store running flag whenever the backend actually exits
       // (e.g. after Back to Launcher stops it), so the launcher shows Run again.
       currentBackend.on('status', function (d) {
+        if (d && d.phase === 'app_exit') { appLogWrite('[app_exit]'); closeAppLog(); }
         if (d && d.phase === 'app_exit' && appStore) appStore.stop(opts.appId).catch(function () {});
       });
       lastSelectedAppId = opts.appId;
@@ -1136,6 +1210,26 @@ function createWindow() {
       return list;
     });
   }
+
+  ipcMain.handle('open-app-log', async (_event, appId) => {
+    const id = appId || lastSelectedAppId || appLogAppId || 'shell';
+    let target = null;
+    if (appLogAppId && String(appLogAppId) === String(id) && appLogPath) target = appLogPath;
+    else target = latestAppLog(id);
+    try {
+      if (!target || !fs.existsSync(target)) {
+        const dir = path.join(appLogRoot, safeLogId(id));
+        fs.mkdirSync(dir, { recursive: true });
+        await shell.openPath(dir);
+        return false;
+      }
+      await shell.openPath(target);
+      return true;
+    } catch (e) {
+      log('warn', 'open-app-log failed:', e && e.message);
+      return false;
+    }
+  });
 
   ipcMain.handle('open-external', async (_event, url) => {
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
@@ -1264,16 +1358,19 @@ function createWindow() {
     // per-app runtime strategy (mixed-strategy suites).
     var appType = selectedApp.type || appsManifest.default_type;
     currentBackend = getBackendForApp(appType, serveStrategy);
+    openAppLog(selectedApp.id);
 
     // Forward status to lifecycle.html and track running state (so multi-app
     // builds get the same quit-confirmation / shutdown UI as single-app).
     currentBackend.on('status', function(data) {
+      appLogWrite('[' + data.phase + '] ' + (data.message || ''));
       log('info', '[lifecycle] ' + data.phase + ': ' + (data.message || ''));
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('lifecycle-status', data);
       }
       if (data.phase === 'server_ready') serverRunning = true;
       if (data.phase === 'stopping_server' || data.phase === 'error' || data.phase === 'server_crashed') serverRunning = false;
+      if (data.phase === 'app_exit') closeAppLog();
       // Update tray status for multi-app mode (mirrors the single-app handler)
       {{#tray_enabled}}
       if (tray) {
@@ -1297,8 +1394,10 @@ function createWindow() {
       }
       {{/tray_enabled}}
     });
+    currentBackend.on('output', function (o) { appLogWrite((o && o.stream ? o.stream : 'out') + ': ' + ((o && o.line) || '')); });
     // Defensive: never let an 'error' event with no listener crash the process.
     currentBackend.on('error', function(err) {
+      appLogWrite('[error] ' + (err && err.message ? err.message : err));
       log('error', 'Backend error event:', err && err.message ? err.message : err);
     });
 

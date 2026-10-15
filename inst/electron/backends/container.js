@@ -541,6 +541,7 @@ class ContainerBackend extends EventEmitter {
             const msg = data.toString().trim();
             if (msg) {
               logDebug(`[container] ${msg}`);
+              this.emit('output', { stream: 'stdout', line: msg });
               // Lines that arrive after the start has settled are no longer
               // startup progress; reporting them would replace the error
               // screen (or the tray's Running state) with "Starting...".
@@ -553,7 +554,10 @@ class ContainerBackend extends EventEmitter {
         logProc.stderr.on('data', (data) => {
           try {
             const msg = data.toString().trim();
-            if (msg) logDebug(`[container] ${msg}`);
+            if (msg) {
+              logDebug(`[container] ${msg}`);
+              this.emit('output', { stream: 'stderr', line: msg });
+            }
           } catch { /* ignore */ }
         });
 

@@ -527,13 +527,16 @@ class NativePyBackend extends EventEmitter {
       let stderr = '';
 
       child.stdout.on('data', (data) => {
-        logDebug(`[Python stdout] ${data.toString().trim()}`);
+        const out = data.toString().trim();
+        logDebug(`[Python stdout] ${out}`);
+        if (out) this.emit('output', { stream: 'stdout', line: out });
       });
 
       child.stderr.on('data', (data) => {
         const msg = data.toString().trim();
         stderr += msg + '\n';
         logDebug(`[Python stderr] ${msg}`);
+        if (msg) this.emit('output', { stream: 'stderr', line: msg });
         if (superseded()) return;
 
         // Surface Python's progress as lifecycle status updates
