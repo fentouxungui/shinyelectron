@@ -178,6 +178,13 @@
     @media (prefers-color-scheme: dark) { .pill.local { background: #312e81; color: #c7d2fe; } }
     .pill.busy { background: #dbeafe; color: #1e40af; }
     @media (prefers-color-scheme: dark) { .pill.busy { background: #1e3a8a; color: #bfdbfe; } }
+    .fav-btn.on { color: #f59e0b; }
+    .storage-dialog { max-width: 560px; width: min(560px, 92vw); max-height: 80vh; overflow: auto; }
+    .storage-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f1f5f9; }
+    .storage-row .storage-muted { color: #64748b; }
+    .storage-section { margin-top: 14px; margin-bottom: 2px; font-weight: 600; font-size: 13px; }
+    @media (prefers-color-scheme: dark) { .storage-row { border-bottom-color: #334155; } .storage-row .storage-muted { color: #94a3b8; } }
+    .settings-dialog .search { display: block; width: 100%; margin: 6px 0 10px; }
   </style>
 </head>
 <body>
@@ -199,6 +206,8 @@
         <button type="button" data-layout="card" title="Card view">Cards</button>
         <button type="button" data-layout="list" title="List view">List</button>
       </div>
+      <button id="settings-btn" class="btn" type="button" hidden>Settings</button>
+      <button id="storage-btn" class="btn" type="button" hidden>Storage</button>
       <button id="done-btn" class="btn" type="button" hidden>Back to my apps</button>
     </div>
   </div>
@@ -208,6 +217,11 @@
     <select id="tag-filter" class="tag-select" aria-label="Filter by tag" hidden></select>
     <button id="clear-filters" class="link-btn" type="button" hidden>Clear</button>
     <button id="install-bundle-btn" class="btn" type="button">Install from file&#8230;</button>
+    <select id="sort-mode" class="tag-select" aria-label="Sort order">
+      <option value="name">Name</option>
+      <option value="recent">Recently used</option>
+    </select>
+    <button id="fav-toggle" class="btn" type="button" aria-pressed="false">&#9734; Favorites</button>
     <span id="result-count" class="result-count"></span>
   </div>
 
@@ -218,6 +232,8 @@
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <div class="overlay" id="overlay" hidden><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
+  <div class="overlay" id="storage-overlay" hidden><div class="dialog storage-dialog" id="storage-dialog" role="dialog" aria-modal="true"></div></div>
+  <div class="overlay" id="settings-overlay" hidden><div class="dialog storage-dialog settings-dialog" id="settings-dialog" role="dialog" aria-modal="true"></div></div>
 
   <script>
     var model = [];
@@ -230,10 +246,47 @@
     var layout = 'card';      // 'card' | 'list'
     var loading = false;
     var loadError = '';
+    var diskFree = null;
     try {
       var savedLayout = localStorage.getItem('shinyapps.layout');
       if (savedLayout === 'card' || savedLayout === 'list') layout = savedLayout;
     } catch (e) {}
+
+    // Favorites / recently used / sort (persisted; purely client-side).
+    var favorites = [];
+    var recent = [];
+    var sortMode = 'name';    // 'name' | 'recent'
+    var favOnly = false;
+    try {
+      favorites = JSON.parse(localStorage.getItem('shinyapps.favorites') || '[]');
+      recent = JSON.parse(localStorage.getItem('shinyapps.recent') || '[]');
+      var savedSort = localStorage.getItem('shinyapps.sort');
+      if (savedSort === 'name' || savedSort === 'recent') sortMode = savedSort;
+    } catch (e) {}
+    if (!Array.isArray(favorites)) favorites = [];
+    if (!Array.isArray(recent)) recent = [];
+    function isFav(id) { return favorites.indexOf(id) !== -1; }
+    function saveFavs() { try { localStorage.setItem('shinyapps.favorites', JSON.stringify(favorites)); } catch (e) {} }
+    function saveRecent() { try { localStorage.setItem('shinyapps.recent', JSON.stringify(recent)); } catch (e) {} }
+    function toggleFav(id) {
+      var i = favorites.indexOf(id);
+      if (i === -1) favorites.push(id); else favorites.splice(i, 1);
+      saveFavs(); render();
+    }
+    function markRecent(id) {
+      var i = recent.indexOf(id);
+      if (i !== -1) recent.splice(i, 1);
+      recent.unshift(id);
+      if (recent.length > 20) recent.length = 20;
+      saveRecent();
+    }
+    function setSortMode(m) {
+      if (m !== 'name' && m !== 'recent') return;
+      sortMode = m;
+      try { localStorage.setItem('shinyapps.sort', sortMode); } catch (e) {}
+      render();
+    }
+    function setFavOnly(on) { favOnly = !!on; render(); }
 
     var STEP_LABELS = {
       resolve: 'Resolving bundle',
@@ -273,11 +326,23 @@
     function runningList() { return model.filter(function (a) { return a.running; }); }
     var bundleBusy = false;
     var bundleStatus = '';
-    function anyInstalling() { return bundleBusy || model.some(function (a) { return a.state === 'installing'; }); }
+    function anyInstalling() { return bundleBusy || model.some(function (a) { return a.state === 'installing' || a.state === 'queued'; }); }
 
     function sortByName(list) {
       return list.slice().sort(function (a, b) {
         return String(a.name || a.id).localeCompare(String(b.name || b.id));
+      });
+    }
+
+    function sortList(list) {
+      var out = sortByName(list);
+      if (sortMode !== 'recent') return out;
+      return out.slice().sort(function (a, b) {
+        var ia = recent.indexOf(a.id), ib = recent.indexOf(b.id);
+        if (ia === -1 && ib === -1) return String(a.name || a.id).localeCompare(String(b.name || b.id));
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
       });
     }
 
@@ -291,13 +356,14 @@
     }
 
     function currentList() {
-      if (view === 'launcher') return sortByName(installedList());
+      if (view === 'launcher') return sortList(installedList());
       var base;
       if (tab === 'installed') base = installedList();
       else if (tab === 'updates') base = updatesList();
       else if (tab === 'running') base = runningList();
       else base = model.slice();
-      return sortByName(base.filter(matchesFilters));
+      if (favOnly) base = base.filter(function (a) { return isFav(a.id); });
+      return sortList(base.filter(matchesFilters));
     }
 
     function emptyMessage() {
@@ -322,6 +388,8 @@
       document.getElementById('tabs').hidden = !manager;
       document.getElementById('filters').hidden = !manager;
       document.getElementById('done-btn').hidden = !manager;
+      document.getElementById('storage-btn').hidden = !manager;
+      document.getElementById('settings-btn').hidden = !manager;
       document.getElementById('subtitle').textContent = manager ? 'Manage applications' : 'Your installed applications';
       var tabs = document.querySelectorAll('#tabs .tab');
       for (var i = 0; i < tabs.length; i++) {
@@ -334,6 +402,14 @@
       }
       var clearBtn = document.getElementById('clear-filters');
       clearBtn.hidden = !(query || selectedTag);
+      var sortEl = document.getElementById('sort-mode');
+      if (sortEl) sortEl.value = sortMode;
+      var favEl = document.getElementById('fav-toggle');
+      if (favEl) {
+        if (favOnly) favEl.classList.add('primary'); else favEl.classList.remove('primary');
+        favEl.setAttribute('aria-pressed', favOnly ? 'true' : 'false');
+        favEl.textContent = (favOnly ? '\u2605' : '\u2606') + ' Favorites';
+      }
     }
 
     function updateLayoutToggle() {
@@ -372,6 +448,7 @@
       name.className = 'app-name';
       name.textContent = app.name || app.id;
       row.appendChild(name);
+      row.appendChild(makeFavButton(app));
       if (app.homepage) {
         var link = document.createElement('button');
         link.type = 'button';
@@ -386,6 +463,17 @@
         row.appendChild(link);
       }
       return row;
+    }
+
+    function makeFavButton(app) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn icon-link fav-btn' + (isFav(app.id) ? ' on' : '');
+      b.textContent = isFav(app.id) ? '\u2605' : '\u2606';
+      b.title = isFav(app.id) ? 'Remove from favorites' : 'Add to favorites';
+      b.setAttribute('aria-label', b.title);
+      b.addEventListener('click', function (ev) { ev.stopPropagation(); toggleFav(app.id); });
+      return b;
     }
 
     function makeLocalPill() {
@@ -410,6 +498,7 @@
         pill.textContent = opVerb(app.op) + '\u2026';
         return pill;
       }
+      if (app.state === 'queued') { pill.className += ' unavailable'; pill.textContent = 'Queued'; return pill; }
       if (app.running) { pill.className += ' running'; pill.textContent = 'Running'; return pill; }
       if (!app.installed) {
         var reason = installBlockedReason(app);
@@ -509,6 +598,13 @@
         });
       }
       items.push({ label: 'View log', onClick: function () { if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog(app.id); } });
+      items.push({ label: 'Copy diagnostics', onClick: function () {
+        if (window.lifecycle && window.lifecycle.copyDiagnostics) {
+          window.lifecycle.copyDiagnostics(app.id).then(function (ok) {
+            showToast(ok ? 'Diagnostics copied to clipboard' : 'Could not copy diagnostics', ok ? 'success' : 'error');
+          }).catch(function () { showToast('Could not copy diagnostics', 'error'); });
+        }
+      } });
       items.push({ label: 'Uninstall', danger: true, onClick: function () { confirmUninstall(app); } });
       return items;
     }
@@ -521,7 +617,16 @@
       if (!app.installed) {
         var reason = installBlockedReason(app);
         var installBtn = makeButton('Install', 'primary', function () {
-          window.lifecycle.installApp(app.id);
+          var go = function () { window.lifecycle.installApp(app.id); };
+          if (diskFree != null && app.size && diskFree < app.size * 3) {
+            showConfirm({
+              title: 'Low disk space',
+              message: 'This app needs about ' + (formatSize(app.size * 3) || '?') + ' free, but only ' + (formatSize(diskFree) || '?') + ' is available. Install anyway?',
+              confirmLabel: 'Install anyway',
+              danger: true,
+              onConfirm: go
+            });
+          } else { go(); }
         }, lock || app.state === 'installing' || !!reason);
         if (reason) {
           installBtn.disabled = true;
@@ -530,6 +635,7 @@
         actions.appendChild(installBtn);
       } else if (app.running) {
         actions.appendChild(makeButton('Open', 'primary', function () {
+          markRecent(app.id);
           window.lifecycle.openApp(app.id);
         }, lock));
         actions.appendChild(makeButton('Stop', '', function () {
@@ -538,6 +644,7 @@
         actions.appendChild(makeOverflowButton(app));
       } else {
         actions.appendChild(makeButton('Run', 'primary', function () {
+          markRecent(app.id);
           window.lifecycle.runApp(app.id);
         }, lock || app.state === 'installing'));
         if (app.updateAvailable) {
@@ -640,10 +747,13 @@
       var busy = anyInstalling();
       busybar.hidden = !busy;
       if (busy) {
-        var ba = model.filter(function (a) { return a.state === 'installing'; })[0];
+        var ba = model.filter(function (a) { return a.state === 'installing' || a.state === 'queued'; })[0];
         busybar.textContent = bundleBusy
           ? ('Installing from bundle \u2014 ' + (bundleStatus || 'please wait') + ' \u2014 do not start other tasks.')
-          : (opVerb(ba && ba.op) + ' ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks.');
+          : (opVerb(ba && ba.op) + ' ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks. ');
+        if (!bundleBusy) {
+          busybar.appendChild(makeButton('Cancel', 'danger', function () { if (window.lifecycle && window.lifecycle.cancelInstall) window.lifecycle.cancelInstall(); }));
+        }
       }
 
       if (loading && model.length === 0) {
@@ -848,6 +958,128 @@
       });
     }
 
+    // --- Storage panel ------------------------------------------------------
+    function closeStorage() { var o = document.getElementById('storage-overlay'); if (o) o.hidden = true; }
+    async function renderStorage(body) {
+      var u = null;
+      try { u = await window.lifecycle.getUsage(); } catch (e) {}
+      body.innerHTML = '';
+      if (!u) { body.textContent = 'Could not read storage info.'; return; }
+      function addLine(label, value, muted) {
+        var row = document.createElement('div');
+        row.className = 'storage-row';
+        var l = document.createElement('span');
+        l.textContent = label;
+        if (muted) l.className = 'storage-muted';
+        var v = document.createElement('span');
+        v.textContent = value;
+        row.appendChild(l); row.appendChild(v); body.appendChild(row);
+      }
+      var f = formatSize;
+      addLine('Installed apps', f(u.appsTotal) || '0 MB');
+      addLine('Shared packages', f(u.sharedTotal) || '0 MB');
+      addLine('Download cache', (f(u.cacheBytes) || '0 MB') + (u.cacheFiles ? '  (' + u.cacheFiles + ' file' + (u.cacheFiles > 1 ? 's' : '') + ')' : ''));
+      if (u.staleDirs) addLine('Incomplete', (f(u.staleBytes) || '0 MB') + '  (' + u.staleDirs + ')');
+      if (u.diskFree != null) addLine('Free disk', f(u.diskFree) || '');
+      var s1 = document.createElement('div'); s1.className = 'storage-section'; s1.textContent = 'Apps'; body.appendChild(s1);
+      (u.apps || []).forEach(function (a) { addLine(a.id + (a.version ? '  v' + a.version : ''), f(a.bytes) || '0 MB', true); });
+      if (u.shared && u.shared.length) {
+        var s2 = document.createElement('div'); s2.className = 'storage-section'; s2.textContent = 'Shared packages'; body.appendChild(s2);
+        (u.shared || []).forEach(function (s) { addLine(s.name + '  (' + s.refs + ' app' + (s.refs === 1 ? '' : 's') + ')', f(s.bytes) || '0 MB', true); });
+      }
+    }
+    async function doCleanup() {
+      try {
+        var r = await window.lifecycle.cleanupStorage();
+        if (r && r.busy) { showToast('A store operation is in progress.', 'error'); return; }
+        showToast('Freed ' + ((r && formatSize(r.freed)) || '0 MB'), 'success');
+        var body = document.getElementById('storage-body');
+        if (body) await renderStorage(body);
+      } catch (e) { showToast('Cleanup failed', 'error'); }
+    }
+    async function openStorage() {
+      var overlay = document.getElementById('storage-overlay');
+      var dlg = document.getElementById('storage-dialog');
+      dlg.innerHTML = '';
+      var title = document.createElement('div');
+      title.className = 'dialog-title';
+      title.textContent = 'Storage';
+      dlg.appendChild(title);
+      var body = document.createElement('div');
+      body.id = 'storage-body';
+      body.textContent = 'Loading\u2026';
+      dlg.appendChild(body);
+      var actions = document.createElement('div');
+      actions.className = 'dialog-actions';
+      actions.appendChild(makeButton('Clean up', 'primary', function () { doCleanup(); }));
+      actions.appendChild(makeButton('Close', '', closeStorage));
+      dlg.appendChild(actions);
+      overlay.hidden = false;
+      await renderStorage(body);
+    }
+
+    // --- Settings -----------------------------------------------------------
+    function closeSettings() { var o = document.getElementById('settings-overlay'); if (o) o.hidden = true; }
+    function settingsLabel(text) { var d = document.createElement('div'); d.className = 'storage-section'; d.textContent = text; return d; }
+    async function openSettings() {
+      var overlay = document.getElementById('settings-overlay');
+      var dlg = document.getElementById('settings-dialog');
+      dlg.innerHTML = '';
+      var s = null;
+      try { s = await window.lifecycle.getSettings(); } catch (e) {}
+      var title = document.createElement('div');
+      title.className = 'dialog-title';
+      title.textContent = 'Settings';
+      dlg.appendChild(title);
+
+      dlg.appendChild(settingsLabel('Catalog URL'));
+      var catInput = document.createElement('input');
+      catInput.type = 'text';
+      catInput.className = 'search';
+      catInput.value = (s && s.catalogUrl) || '';
+      dlg.appendChild(catInput);
+      var catRow = document.createElement('div'); catRow.className = 'dialog-actions';
+      catRow.appendChild(makeButton('Save catalog URL', 'primary', async function () {
+        var r = null;
+        try { r = await window.lifecycle.setCatalogUrl(catInput.value); } catch (e) {}
+        if (r && r.ok) { showToast('Catalog URL saved', 'success'); refresh(); }
+        else { showToast((r && r.error) || 'Could not save catalog URL', 'error'); }
+      }));
+      dlg.appendChild(catRow);
+
+      dlg.appendChild(settingsLabel('Install bundle from URL'));
+      var urlInput = document.createElement('input');
+      urlInput.type = 'text';
+      urlInput.className = 'search';
+      urlInput.placeholder = 'https://\u2026/app-1.0.0-win-x64.zip';
+      dlg.appendChild(urlInput);
+      var urlRow = document.createElement('div'); urlRow.className = 'dialog-actions';
+      urlRow.appendChild(makeButton('Install from URL', 'primary', function () {
+        var u = urlInput.value.trim();
+        if (!u) return;
+        closeSettings();
+        if (window.lifecycle.installFromUrl) window.lifecycle.installFromUrl(u);
+      }));
+      dlg.appendChild(urlRow);
+
+      var crashWrap = document.createElement('label');
+      crashWrap.className = 'storage-row';
+      var crashText = document.createElement('span');
+      crashText.className = 'storage-muted';
+      crashText.textContent = 'Save crash reports locally (never uploaded)';
+      var crashCb = document.createElement('input');
+      crashCb.type = 'checkbox';
+      crashCb.checked = !!(s && s.crashReporting);
+      crashCb.addEventListener('change', function () { if (window.lifecycle.setCrashReporting) window.lifecycle.setCrashReporting(crashCb.checked); });
+      crashWrap.appendChild(crashText); crashWrap.appendChild(crashCb);
+      dlg.appendChild(crashWrap);
+
+      var actions = document.createElement('div'); actions.className = 'dialog-actions';
+      actions.appendChild(makeButton('Close', '', closeSettings));
+      dlg.appendChild(actions);
+      overlay.hidden = false;
+    }
+
     // --- Toasts -------------------------------------------------------------
     function showToast(message, type) {
       var host = document.getElementById('toasts');
@@ -897,10 +1129,20 @@
       document.getElementById('tag-filter').value = '';
       render();
     });
+    document.getElementById('sort-mode').addEventListener('change', function () {
+      setSortMode(this.value);
+    });
+    document.getElementById('fav-toggle').addEventListener('click', function () {
+      setFavOnly(!favOnly);
+    });
     document.getElementById('install-bundle-btn').addEventListener('click', function () {
       if (anyInstalling()) { showToast('A store operation is in progress; please wait.', 'error'); return; }
       if (window.lifecycle && window.lifecycle.installFromFile) window.lifecycle.installFromFile();
     });
+    document.getElementById('storage-btn').addEventListener('click', function () { openStorage(); });
+    document.getElementById('storage-overlay').addEventListener('click', function (ev) { if (ev.target === this) closeStorage(); });
+    document.getElementById('settings-btn').addEventListener('click', function () { openSettings(); });
+    document.getElementById('settings-overlay').addEventListener('click', function (ev) { if (ev.target === this) closeSettings(); });
     window.addEventListener('dragover', function (ev) { ev.preventDefault(); });
     window.addEventListener('drop', function (ev) {
       ev.preventDefault();
@@ -928,6 +1170,7 @@
         model = await window.lifecycle.listApps();
         byId = {};
         model.forEach(function (a) { byId[a.id] = a; });
+        try { diskFree = await window.lifecycle.getDiskFree(); } catch (e) { diskFree = null; }
       } catch (e) {
         loadError = (e && e.message) || String(e) || 'unknown error';
         if (!Array.isArray(model)) model = [];
@@ -946,6 +1189,8 @@
           if (view === 'manager') render(); else setView('manager');
         } else if (cmd.cmd === 'install_bundle') {
           if (window.lifecycle.installFromFile) window.lifecycle.installFromFile();
+        } else if (cmd.cmd === 'settings') {
+          openSettings();
         } else if (cmd.cmd === 'run' && cmd.appId && window.lifecycle.runApp) {
           window.lifecycle.runApp(cmd.appId);
         }
@@ -983,7 +1228,7 @@
         var wasInstalling = !!(app && app.state === 'installing');
         if (ev.state === 'installing') delete errors[ev.id];
         if (ev.state === 'done') delete errors[ev.id];
-        if (ev.state === 'error') errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed', op: ev.op || '' };
+        if (ev.state === 'error' && !ev.cancelled) errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed', op: ev.op || '' };
         if (app) {
           if (ev.state) app.state = ev.state;
           if (ev.op) app.op = ev.op;
@@ -1014,7 +1259,9 @@
           var verb = ev.op === 'install_app' ? 'Installed ' : ev.op === 'update_app' ? 'Updated ' : ev.op === 'uninstall_app' ? 'Uninstalled ' : '';
           if (verb) showToast(verb + nm, 'success');
         }
-        if (ev.state === 'error') {
+        if (ev.state === 'error' && ev.cancelled) {
+          showToast('Cancelled ' + nm, 'success');
+        } else if (ev.state === 'error') {
           showToast('Failed to ' + opAction(ev.op) + ' ' + nm + (ev.step ? ' (' + ev.step + ')' : ''), 'error');
         }
         if ((ev.state === 'done' && ev.op) || ev.state === 'error') refresh();

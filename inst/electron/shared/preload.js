@@ -31,5 +31,14 @@ contextBridge.exposeInMainWorld('lifecycle', {
   installFromFile: (path) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', path }),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  openAppLog: (appId) => ipcRenderer.invoke('open-app-log', appId)
+  openAppLog: (appId) => ipcRenderer.invoke('open-app-log', appId),
+  cancelInstall: () => ipcRenderer.send('lifecycle-action', { type: 'cancel_store' }),
+  copyDiagnostics: (appId) => ipcRenderer.invoke('copy-diagnostics', appId),
+  getUsage: () => ipcRenderer.invoke('store-usage'),
+  cleanupStorage: () => ipcRenderer.invoke('store-cleanup'),
+  getDiskFree: () => ipcRenderer.invoke('store-disk-free'),
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  setCatalogUrl: (url) => ipcRenderer.invoke('set-catalog-url', url),
+  setCrashReporting: (on) => ipcRenderer.invoke('set-crash-reporting', on),
+  installFromUrl: (url) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', url })
 });

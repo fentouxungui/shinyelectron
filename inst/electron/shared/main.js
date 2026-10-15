@@ -105,6 +105,42 @@ function latestAppLog(appId) {
   return null;
 }
 
+// ---- User settings (catalog source, local crash reporting) -----------------
+const DEFAULT_CATALOG_URL = 'https://fentouxungui.github.io/ShinyApps/catalog.json';
+const settingsPath = path.join(app.getPath('userData'), 'settings.json');
+let appSettings = {};
+try { appSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) || {}; } catch (e) { appSettings = {}; }
+function saveSettings() { try { fs.writeFileSync(settingsPath, JSON.stringify(appSettings, null, 2)); } catch (e) { /* best effort */ } }
+
+// Local-only crash capture (opt-in). Uncaught main-process errors are written
+// to <logDir>/crashes/. Nothing is ever uploaded.
+let crashHandlersInstalled = false;
+function installCrashHandlers() {
+  if (!appSettings.crashReporting) return;
+  if (crashHandlersInstalled) return;
+  crashHandlersInstalled = true;
+  const writeCrash = (kind, err) => {
+    if (!appSettings.crashReporting) return;
+    try {
+      const dir = path.join(logDir, 'crashes');
+      fs.mkdirSync(dir, { recursive: true });
+      const f = path.join(dir, 'crash-' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt');
+      fs.writeFileSync(f, [
+        'ShinyApps crash report',
+        'kind: ' + kind,
+        'time: ' + new Date().toISOString(),
+        'shell: ' + app.getVersion() + '  bundled R: ' + (SHELL_R_VERSION || ''),
+        'electron: ' + process.versions.electron + '  node: ' + process.versions.node,
+        'os: ' + process.platform + ' ' + process.arch,
+        '',
+        (err && err.stack) ? err.stack : String(err)
+      ].join('\n'));
+    } catch (e) { /* best effort */ }
+  };
+  process.on('uncaughtException', (err) => { writeCrash('uncaughtException', err); log('error', 'uncaughtException:', (err && err.stack) || err); });
+  process.on('unhandledRejection', (reason) => { writeCrash('unhandledRejection', reason); });
+}
+
 function log(level, ...args) {
   if ((LOG_LEVELS[level] || 0) < LOG_THRESHOLD) return;
   const msg = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${args.join(' ')}`;
@@ -157,8 +193,49 @@ let isLauncherVisible = true;   // true while the launcher page is shown (multi-
 let appStore = null;
 // Last loaded URL per catalog app id, so a still-running app can be re-opened.
 var storeAppUrls = {};
-// Single-flight guard: only one install/update/uninstall may run at a time.
+// Single-flight guard: one install/update/uninstall at a time; extra requests
+// are queued, and the running one can be cancelled via AbortController.
 let storeBusy = false;
+let storeController = null;
+const storeQueue = [];
+
+async function runStoreAction(actionType, storeId) {
+  const sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
+  if (storeBusy) {
+    storeQueue.push({ type: actionType, appId: storeId });
+    sendStore({ state: 'queued', statusText: 'queued' });
+    return;
+  }
+  storeBusy = true;
+  storeController = new AbortController();
+  const signal = storeController.signal;
+  var lastProgAt = 0, lastProgPhase = '';
+  const storeProg = function (pp) {
+    var now = Date.now();
+    if (pp.phase === lastProgPhase && now - lastProgAt < 100) return;
+    lastProgAt = now; lastProgPhase = pp.phase;
+    sendStore({ state: 'installing', op: actionType, percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
+  };
+  try {
+    sendStore({ state: 'installing', op: actionType, statusText: 'working...' });
+    if (actionType === 'install_app') await appStore.install(storeId, storeProg, signal);
+    else if (actionType === 'update_app') await appStore.update(storeId, storeProg, signal);
+    else await appStore.uninstall(storeId);
+    if (actionType === 'uninstall_app' || actionType === 'update_app') delete storeAppUrls[storeId];
+    sendStore({ state: 'done', op: actionType });
+  } catch (e) {
+    if (e && e.code === 'CANCELLED') sendStore({ state: 'error', op: actionType, error: 'Cancelled', cancelled: true, step: (e.step || '') });
+    else sendStore({ state: 'error', op: actionType, error: (e && e.message) || String(e), step: (e && e.step) || '' });
+  } finally {
+    storeBusy = false;
+    storeController = null;
+    {{#menu_enabled}}
+    createMenu();
+    {{/menu_enabled}}
+    var next = storeQueue.shift();
+    if (next) runStoreAction(next.type, next.appId);
+  }
+}
 
 // Per-app metadata for Help/About and the in-app update check. Set when an app
 // is launched; reset to null on the launcher so Help/About show the shell.
@@ -491,6 +568,14 @@ function buildAppsSubmenu() {
       click: function () {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('store-command', { cmd: 'install_bundle' });
+        }
+      }
+    });
+    sub.push({
+      label: 'Settings\u2026',
+      click: function () {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('store-command', { cmd: 'settings' });
         }
       }
     });
@@ -1140,7 +1225,7 @@ function createWindow() {
   if (appsManifest) {
     appStore = createAppStore({
       userDataDir: app.getPath('userData'),
-      catalogUrl: 'https://fentouxungui.github.io/ShinyApps/catalog.json',
+      catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL,
       startBackend: storeStartBackend,
       shellVersion: '{{{app_version_js}}}',
       shellRVersion: SHELL_R_VERSION,
@@ -1212,6 +1297,93 @@ function createWindow() {
       return list;
     });
   }
+
+  ipcMain.handle('copy-diagnostics', async (_event, appId) => {
+    try {
+      const { clipboard } = require('electron');
+      const os = require('os');
+      const id = appId || lastSelectedAppId || null;
+      const ins = (id && appStore) ? appStore.getState().apps[id] : null;
+      const ce = (id && appStore) ? appStore.catalogEntry(id) : null;
+      const L = [];
+      L.push('ShinyApps diagnostics');
+      L.push('generated: ' + new Date().toISOString());
+      L.push('shell: ' + app.getVersion() + '  bundled R: ' + (SHELL_R_VERSION || '(unknown)'));
+      L.push('electron: ' + process.versions.electron + '  chrome: ' + process.versions.chrome + '  node: ' + process.versions.node);
+      L.push('os: ' + process.platform + ' ' + process.arch + ' (' + (os.release ? os.release() : '') + ')');
+      if (id) {
+        L.push('');
+        L.push('app: ' + id);
+        if (ins) {
+          L.push('installed: v' + ins.version + '  source: ' + (ins.source || '?') + '  platform: ' + (ins.platform || '?'));
+          L.push('packages: ' + ((ins.packages || []).join(', ') || '(none)'));
+        } else {
+          L.push('installed: no');
+        }
+        if (ce) L.push('catalog: v' + ce.version + (ce.r_version ? '  requires R ' + ce.r_version : ''));
+      }
+      if (id) {
+        const logPath = (appLogAppId && String(appLogAppId) === String(id) && appLogPath) ? appLogPath : latestAppLog(id);
+        if (logPath && fs.existsSync(logPath)) {
+          L.push('');
+          L.push('--- log: ' + path.basename(logPath) + ' (last 200 lines) ---');
+          L.push(fs.readFileSync(logPath, 'utf8').split('\n').slice(-200).join('\n'));
+        }
+      }
+      clipboard.writeText(L.join('\n'));
+      return true;
+    } catch (e) {
+      log('warn', 'copy-diagnostics failed:', e && e.message);
+      return false;
+    }
+  });
+
+  ipcMain.handle('store-usage', async () => {
+    if (!appStore) return null;
+    try { return await appStore.usage(); }
+    catch (e) { log('warn', 'store-usage failed:', e && e.message); return null; }
+  });
+
+  ipcMain.handle('store-cleanup', async () => {
+    if (!appStore) return { freed: 0 };
+    if (storeBusy) return { freed: 0, busy: true };
+    storeBusy = true;
+    try { return await appStore.cleanup(); }
+    catch (e) { log('warn', 'store-cleanup failed:', e && e.message); return { freed: 0, error: String((e && e.message) || e) }; }
+    finally {
+      storeBusy = false;
+      const nq = storeQueue.shift();
+      if (nq) runStoreAction(nq.type, nq.appId);
+    }
+  });
+
+  ipcMain.handle('store-disk-free', async () => {
+    if (!appStore) return null;
+    try { return await appStore.getDiskFree(); }
+    catch (e) { return null; }
+  });
+
+  ipcMain.handle('get-settings', async () => ({
+    catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL,
+    defaultCatalogUrl: DEFAULT_CATALOG_URL,
+    crashReporting: !!appSettings.crashReporting,
+  }));
+
+  ipcMain.handle('set-catalog-url', async (_event, url) => {
+    const u = String(url || '').trim();
+    if (u && !/^https?:\/\//i.test(u)) return { ok: false, error: 'URL must start with http:// or https://' };
+    if (u) appSettings.catalogUrl = u; else delete appSettings.catalogUrl;
+    saveSettings();
+    if (appStore) appStore.setCatalogUrl(appSettings.catalogUrl || DEFAULT_CATALOG_URL);
+    return { ok: true, catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL };
+  });
+
+  ipcMain.handle('set-crash-reporting', async (_event, on) => {
+    appSettings.crashReporting = !!on;
+    saveSettings();
+    if (appSettings.crashReporting) installCrashHandlers();
+    return { ok: true, crashReporting: !!appSettings.crashReporting };
+  });
 
   ipcMain.handle('open-app-log', async (_event, appId) => {
     const id = appId || lastSelectedAppId || appLogAppId || 'shell';
@@ -1536,44 +1708,17 @@ function createWindow() {
 
     } else if (actionType === 'install_app' || actionType === 'uninstall_app' || actionType === 'update_app') {
       if (!appStore) return;
-      var storeId = action.appId;
-      var sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
-      if (storeBusy) {
-        sendStore({ state: 'busy', message: 'Another operation is in progress; please wait until it finishes.' });
-        return;
-      }
-      var lastProgAt = 0;
-      var lastProgPhase = '';
-      var storeProg = function (pp) {
-        var now = Date.now();
-        if (pp.phase === lastProgPhase && now - lastProgAt < 100) return;
-        lastProgAt = now;
-        lastProgPhase = pp.phase;
-        sendStore({ state: 'installing', op: actionType, percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
-      };
-      var storeJob = actionType === 'install_app'
-        ? function () { return appStore.install(storeId, storeProg); }
-        : actionType === 'uninstall_app' ? function () { return appStore.uninstall(storeId); } : function () { return appStore.update(storeId, storeProg); };
-      storeBusy = true;
-      try {
-        sendStore({ state: 'installing', op: actionType, statusText: 'working...' });
-        await storeJob();
-        if (actionType === 'uninstall_app' || actionType === 'update_app') delete storeAppUrls[storeId];
-        sendStore({ state: 'done', op: actionType });
-      } catch (e) {
-        sendStore({ state: 'error', op: actionType, error: (e && e.message) || String(e), step: (e && e.step) || '' });
-      } finally {
-        storeBusy = false;
-      }
-      {{#menu_enabled}}
-      createMenu();   // refresh Quick Run after install / uninstall / update
-      {{/menu_enabled}}
+      await runStoreAction(actionType, action.appId);
+
+    } else if (actionType === 'cancel_store') {
+      if (storeController) storeController.abort();
 
     } else if (actionType === 'install_bundle') {
       if (!appStore) return;
       const { dialog } = require('electron');
       let bundlePath = action.path;
-      if (!bundlePath) {
+      const bundleUrl = action.url;
+      if (!bundlePath && !bundleUrl) {
         const res = await dialog.showOpenDialog(mainWindow, {
           title: 'Install app bundle',
           properties: ['openFile'],
@@ -1615,13 +1760,17 @@ function createWindow() {
           lastProgPhase = pp.phase;
           sendBundle({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
         };
-        await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
+        if (bundleUrl) await appStore.installFromUrl(bundleUrl, { onProgress: onProg, confirm: confirmBundle });
+        else await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
         sendBundle({ state: 'done', op: 'install_bundle' });
       } catch (e) {
         if (!(e && e.cancelled)) sendBundle({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
         else sendBundle({ state: 'done' });
       } finally {
         storeBusy = false;
+        // A bundle install also owns storeBusy: run anything that queued behind it.
+        const nextQueued = storeQueue.shift();
+        if (nextQueued) runStoreAction(nextQueued.type, nextQueued.appId);
       }
       {{#menu_enabled}}
       createMenu();
@@ -1778,6 +1927,7 @@ function createWindow() {
 // App event handlers
 app.whenReady().then(() => {
   initLogging();
+  installCrashHandlers();
   log('info', 'App starting');
   log('info', 'Version: {{{app_version_js}}}');
   log('info', 'App type: {{app_type}}');

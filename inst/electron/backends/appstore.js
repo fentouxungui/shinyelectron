@@ -42,16 +42,24 @@ async function downloadToString(url) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function cancelError() {
+  const e = new Error('cancelled');
+  e.code = 'CANCELLED';
+  return e;
+}
+
 async function downloadToFile(url, dest, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
   const expectedSize = opts.expectedSize || 0;
   const idleMs = opts.idleMs || 60000;
   const attempts = opts.attempts || 5;
   const log = opts.log || (() => {});
+  const signal = opts.signal || null;
   const part = dest + '.part';
   await fsp.mkdir(path.dirname(dest), { recursive: true });
   let lastErr = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (signal && signal.aborted) throw cancelError();
     let start = 0;
     try { start = fs.statSync(part).size; } catch (e) { start = 0; }
     try {
@@ -65,6 +73,14 @@ async function downloadToFile(url, dest, opts = {}) {
       let received = start;
       let idle = setTimeout(() => res.destroy(new Error('download stalled')), idleMs);
       await new Promise((resolve, reject) => {
+        const onAbort = () => {
+          const e = cancelError();
+          try { res.destroy(e); } catch (x) {}
+          try { out.destroy(); } catch (x) {}
+          reject(e);
+        };
+        const done = (fn) => (v) => { if (signal) signal.removeEventListener('abort', onAbort); fn(v); };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
         res.on('data', (c) => {
           received += c.length;
           clearTimeout(idle);
@@ -72,9 +88,9 @@ async function downloadToFile(url, dest, opts = {}) {
           onProgress(total ? received / total : 0, received, total);
         });
         res.pipe(out);
-        out.on('finish', resolve);
-        out.on('error', reject);
-        res.on('error', reject);
+        out.on('finish', done(resolve));
+        out.on('error', done(reject));
+        res.on('error', done(reject));
       });
       clearTimeout(idle);
       const size = fs.statSync(part).size;
@@ -117,7 +133,7 @@ function cmpVersion(a, b) {
 
 // Extract a zip on a worker thread so a large bundle never blocks the main
 // (UI) process. Progress is reported as uncompressed bytes processed.
-function unzip(zipPath, destDir, onProgress = () => {}) {
+function unzip(zipPath, destDir, onProgress = () => {}, signal = null) {
   return new Promise((resolve, reject) => {
     let workerPath = path.join(__dirname, 'unzip-worker.js');
     // backends/ is asarUnpack-ed, so point the worker at the real file.
@@ -136,6 +152,10 @@ function unzip(zipPath, destDir, onProgress = () => {}) {
       try { worker.terminate(); } catch (e) { /* best effort */ }
       if (err) reject(err); else resolve();
     };
+    if (signal) {
+      if (signal.aborted) { finish(cancelError()); return; }
+      signal.addEventListener('abort', () => finish(cancelError()), { once: true });
+    }
     worker.on('message', (msg) => {
       if (!msg) return;
       if (msg.type === 'progress') {
@@ -222,7 +242,8 @@ function assertInside(root, rel) {
 }
 
 function createAppStore(options) {
-  const { userDataDir, catalogUrl, startBackend, shellVersion = '', shellRVersion = '', log = () => {} } = options;
+  const { userDataDir, startBackend, shellVersion = '', shellRVersion = '', log = () => {} } = options;
+  let catalogUrl = options.catalogUrl;
 
   const statePath = path.join(userDataDir, 'state.json');
   const appsDir = path.join(userDataDir, 'apps');
@@ -257,7 +278,16 @@ function createAppStore(options) {
   }
   function catalogEntry(id) { return catalog && catalog.apps.find((a) => a.id === id); }
 
-  async function install(id, onProgress = () => {}) {
+  // Switch the catalog source at runtime (Settings); resets the cache.
+  function setCatalogUrl(url) {
+    if (typeof url === 'string' && url) {
+      catalogUrl = url;
+      catalog = null;
+      catalogFetchedAt = 0;
+    }
+  }
+
+  async function install(id, onProgress = () => {}, signal = null) {
     const entry = catalogEntry(id);
     if (!entry) { const e = new Error(`unknown app: ${id}`); e.step = 'resolve'; throw e; }
     const plat = platformKey();
@@ -282,6 +312,7 @@ function createAppStore(options) {
       await downloadToFile(art.url, zip, {
         expectedSize: art.size || 0,
         log,
+        signal,
         onProgress: (frac, got, total) => onProgress({
           phase: 'downloading',
           percent: Math.round((frac || 0) * 100),
@@ -289,6 +320,7 @@ function createAppStore(options) {
         }),
       });
       log(`downloaded ${zip} (${fs.statSync(zip).size} bytes)`);
+      if (signal && signal.aborted) throw cancelError();
 
       // Verify against the catalog BEFORE touching anything on disk.
       step = 'verify';
@@ -313,7 +345,7 @@ function createAppStore(options) {
       onProgress({ phase: 'unpacking', percent: 0, statusText: 'unpacking' });
       staging = path.join(appsDir, id, `.staging-${entry.version}-${Date.now()}`);
       await fsp.rm(staging, { recursive: true, force: true });
-      await unzip(zip, staging, onProgress);
+      await unzip(zip, staging, onProgress, signal);
 
       const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
       if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
@@ -349,6 +381,7 @@ function createAppStore(options) {
   async function installFromFile(zipPath, opts = {}) {
     const onProgress = opts.onProgress || (() => {});
     const confirm = opts.confirm || (async () => true);
+    const signal = opts.signal || null;
     const plat = platformKey();
     let step = 'resolve';
     let staging = null;
@@ -373,7 +406,7 @@ function createAppStore(options) {
       staging = path.join(appsDir, '.incoming-' + Date.now());
       await fsp.rm(staging, { recursive: true, force: true });
       onProgress({ phase: 'unpacking', percent: 0, statusText: 'unpacking' });
-      await unzip(zipPath, staging, onProgress);
+      await unzip(zipPath, staging, onProgress, signal);
 
       const manPath = path.join(staging, 'manifest.json');
       if (!fs.existsSync(manPath)) { const e = new Error('bundle has no manifest.json'); e.step = 'install'; throw e; }
@@ -428,6 +461,30 @@ function createAppStore(options) {
       if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
       if (e && !e.step) e.step = step;
       throw e;
+    }
+  }
+
+  // Install a bundle downloaded from a URL: fetch to the cache, then install it
+  // as a local bundle (same validation + confirmation path).
+  async function installFromUrl(url, opts = {}) {
+    const onProgress = opts.onProgress || (() => {});
+    const signal = opts.signal || null;
+    if (!/^https?:\/\//i.test(url || '')) { const e = new Error('invalid URL'); e.step = 'download'; throw e; }
+    const tmp = path.join(cacheDir, 'bundle-' + Date.now() + '.zip');
+    try {
+      onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' });
+      await downloadToFile(url, tmp, {
+        signal,
+        log,
+        onProgress: (frac, got, total) => onProgress({
+          phase: 'downloading',
+          percent: Math.round((frac || 0) * 100),
+          statusText: 'downloading ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
+        }),
+      });
+      return await installFromFile(tmp, opts);
+    } finally {
+      await fsp.rm(tmp, { force: true }).catch(() => {});
     }
   }
 
@@ -507,19 +564,118 @@ function createAppStore(options) {
     }
     return out;
   }
-  async function update(id, onProgress = () => {}) {
+  async function update(id, onProgress = () => {}, signal = null) {
     const e = catalogEntry(id);
     const app = state.apps[id];
     if (!e || !app || cmpVersion(e.version, app.version) <= 0) return;
     await stop(id);
     const oldDir = app.dir;
-    await install(id, onProgress);
+    await install(id, onProgress, signal);
     await pruneRefs(id, state.apps[id].packages);
     // Never delete the freshly installed dir (guards against manifest==catalog mismatch).
     if (oldDir && path.resolve(oldDir) !== path.resolve(state.apps[id].dir)) {
       await fsp.rm(oldDir, { recursive: true, force: true });
     }
     log(`updated ${id} -> ${state.apps[id].version}`);
+  }
+
+  async function dirSize(dir) {
+    let total = 0;
+    let entries;
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) { return 0; }
+    for (const ent of entries) {
+      const fp = path.join(dir, ent.name);
+      try {
+        if (ent.isDirectory()) total += await dirSize(fp);
+        else if (ent.isFile()) total += (await fsp.stat(fp)).size;
+      } catch (e) { /* skip unreadable */ }
+    }
+    return total;
+  }
+
+  // Storage report for the launcher's Storage panel.
+  async function usage() {
+    const apps = [];
+    let appsTotal = 0;
+    for (const [id, ins] of Object.entries(state.apps)) {
+      let bytes = 0;
+      try { bytes = await dirSize(path.join(appsDir, id)); } catch (e) {}
+      appsTotal += bytes;
+      apps.push({ id: id, version: ins.version, source: ins.source || '', bytes: bytes });
+    }
+    const shared = [];
+    let sharedTotal = 0;
+    for (const [name, entry] of Object.entries(state.shared || {})) {
+      let bytes = 0;
+      try { bytes = await dirSize(path.join(sharedLib, name)); } catch (e) {}
+      sharedTotal += bytes;
+      shared.push({ name: name, version: entry.version, refs: (entry.refs || []).length, bytes: bytes });
+    }
+    let cacheBytes = 0, cacheFiles = 0;
+    try {
+      const files = await fsp.readdir(cacheDir);
+      for (const f of files) { try { const st = await fsp.stat(path.join(cacheDir, f)); if (st.isFile()) { cacheBytes += st.size; cacheFiles++; } } catch (e) {} }
+    } catch (e) {}
+    let staleBytes = 0, staleDirs = 0;
+    try {
+      const ids = await fsp.readdir(appsDir);
+      for (const id of ids) {
+        let subs = [];
+        try { subs = await fsp.readdir(path.join(appsDir, id)); } catch (e) { continue; }
+        for (const s of subs) {
+          if (s.indexOf('.staging-') === 0 || s.indexOf('.incoming-') === 0) {
+            staleDirs++;
+            try { staleBytes += await dirSize(path.join(appsDir, id, s)); } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+    return {
+      apps: apps.sort((a, b) => b.bytes - a.bytes),
+      appsTotal: appsTotal,
+      shared: shared.sort((a, b) => b.bytes - a.bytes),
+      sharedTotal: sharedTotal,
+      cacheBytes: cacheBytes,
+      cacheFiles: cacheFiles,
+      staleBytes: staleBytes,
+      staleDirs: staleDirs,
+      diskFree: await freeBytes(appsDir),
+      total: appsTotal + sharedTotal + cacheBytes + staleBytes,
+    };
+  }
+
+  // Reclaim disk: cached archives, unreferenced shared packages, stale dirs.
+  async function cleanup() {
+    let freed = 0;
+    try {
+      const files = await fsp.readdir(cacheDir);
+      for (const f of files) {
+        const fp = path.join(cacheDir, f);
+        try { const st = await fsp.stat(fp); if (st.isFile()) { freed += st.size; await fsp.rm(fp, { force: true }); } } catch (e) {}
+      }
+    } catch (e) {}
+    for (const name of Object.keys(state.shared || {})) {
+      const entry = state.shared[name];
+      if (entry && entry.refs && entry.refs.length === 0) {
+        try { const sp = path.join(sharedLib, name); freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); delete state.shared[name]; } catch (e) {}
+      }
+    }
+    saveState();
+    try {
+      const ids = await fsp.readdir(appsDir);
+      for (const id of ids) {
+        let subs = [];
+        try { subs = await fsp.readdir(path.join(appsDir, id)); } catch (e) { continue; }
+        for (const s of subs) {
+          if (s.indexOf('.staging-') === 0 || s.indexOf('.incoming-') === 0) {
+            const sp = path.join(appsDir, id, s);
+            try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+    log('cleanup freed ' + Math.round(freed / 1048576) + ' MB');
+    return { freed: freed };
   }
 
   return {
@@ -530,6 +686,9 @@ function createAppStore(options) {
     forget,
     getState: () => state,
     getCatalog: () => catalog,
+    setCatalogUrl, installFromUrl,
+    usage, cleanup,
+    getDiskFree: () => freeBytes(appsDir),
   };
 }
 

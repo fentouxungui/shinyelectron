@@ -192,6 +192,7 @@
         <button class="btn btn-primary" id="btn-retry">Retry</button>
         <button class="btn btn-secondary" id="btn-quit">Quit</button>
         <button class="btn btn-secondary" id="btn-open-log">Open log</button>
+        <button class="btn btn-secondary" id="btn-copy-diag">Copy diagnostics</button>
       </div>
       {{/has_custom_error}}
     </div>
@@ -263,6 +264,10 @@
     var openLogBtn = document.getElementById('btn-open-log');
     if (openLogBtn) openLogBtn.addEventListener('click', function() {
       if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog();
+    });
+    var copyDiagBtn = document.getElementById('btn-copy-diag');
+    if (copyDiagBtn) copyDiagBtn.addEventListener('click', function() {
+      if (window.lifecycle && window.lifecycle.copyDiagnostics) window.lifecycle.copyDiagnostics();
     });
     document.getElementById('btn-quit').addEventListener('click', function() {
       if (window.lifecycle) window.lifecycle.quit();
