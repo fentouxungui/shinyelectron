@@ -43,5 +43,7 @@ contextBridge.exposeInMainWorld('lifecycle', {
   setCrashReporting: (on) => ipcRenderer.invoke('set-crash-reporting', on),
   installFromUrl: (url) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', url }),
   changeDataRoot: () => ipcRenderer.invoke('change-data-root'),
+  resetLocalData: () => ipcRenderer.invoke('reset-local-data'),
+  uninstallShell: () => ipcRenderer.invoke('uninstall-shinyapps'),
   setQuickRunOrder: (data) => ipcRenderer.send('quick-run-order', data)
 });

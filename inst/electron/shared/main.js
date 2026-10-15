@@ -792,8 +792,7 @@ function createMenu() {
       label: appTitle,
       submenu: [
         { label: 'About ' + appTitle, click: () => { showAboutDialog().catch((err) => log('error', 'About dialog failed:', err)); } },
-        { type: 'separator' },
-        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } },
+
         { type: 'separator' },
         { role: 'quit', label: 'Quit ' + appTitle }
       ]
@@ -858,9 +857,7 @@ function createMenu() {
             showAboutDialog().catch((err) => log('error', 'About dialog failed:', err));
           }
         },
-        { type: 'separator' },
-        { label: 'Reset local data\u2026', click: () => { resetLocalData().catch((err) => log('error', 'reset failed:', err)); } },
-        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } }
+
       ]
     }
   ];
@@ -873,8 +870,7 @@ function createMenu() {
       label: appTitle,
       submenu: [
         { label: 'About ' + appTitle, click: () => { showAboutDialog().catch((err) => log('error', 'About dialog failed:', err)); } },
-        { type: 'separator' },
-        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } },
+
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -977,9 +973,7 @@ function createMenu() {
             showAboutDialog().catch((err) => log('error', 'About dialog failed:', err));
           }
         },
-        { type: 'separator' },
-        { label: 'Reset local data\u2026', click: () => { resetLocalData().catch((err) => log('error', 'reset failed:', err)); } },
-        { label: 'Uninstall {{{app_name_js}}}\u2026', click: () => { uninstallShinyApps().catch((err) => log('error', 'uninstall failed:', err)); } }
+
       ]
     }
   ];
@@ -1561,6 +1555,16 @@ function createWindow() {
     saveSettings();
     if (appSettings.crashReporting) installCrashHandlers();
     return { ok: true, crashReporting: !!appSettings.crashReporting };
+  });
+
+  ipcMain.handle('reset-local-data', async () => {
+    await resetLocalData();
+    return true;
+  });
+
+  ipcMain.handle('uninstall-shinyapps', async () => {
+    await uninstallShinyApps();
+    return true;
   });
 
   ipcMain.handle('change-data-root', async () => {

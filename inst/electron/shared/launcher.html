@@ -143,7 +143,7 @@
     .popmenu-item:focus-visible, .link-btn:focus-visible, .search:focus-visible,
     .tag-select:focus-visible { outline: 2px solid {{brand_primary}}; outline-offset: 2px; }
     /* Dark mode */
-    @media (prefers-color-scheme: dark) {
+    :root[data-theme="dark"] {
       body { background: #0f172a; color: #e2e8f0; }
       .header p, .app-desc, .status, .result-count, .empty, .list-header { color: #94a3b8; }
       .app-meta { color: #64748b; }
@@ -168,24 +168,40 @@
     .banner .btn { margin-left: auto; }
     .app-title-row { min-width: 0; }
     .app-title-row .app-name { min-width: 0; }
-    @media (prefers-color-scheme: dark) {
+    :root[data-theme="dark"] {
       .pill.unavailable { background: #334155; color: #cbd5e1; }
       .banner { background: #78350f; color: #fde68a; border-color: #92400e; }
     }
     .busybar { max-width: 100%; margin: 0 auto 12px; background: #dbeafe; color: #1e3a8a; border: 1px solid #bfdbfe; border-radius: 10px; padding: 10px 14px; font-size: 13px; display: flex; align-items: center; gap: 10px; }
-    @media (prefers-color-scheme: dark) { .busybar { background: #1e3a8a; color: #bfdbfe; border-color: #1e40af; } }
+    :root[data-theme="dark"] { .busybar { background: #1e3a8a; color: #bfdbfe; border-color: #1e40af; } }
     .pill.local { background: #e0e7ff; color: #3730a3; }
-    @media (prefers-color-scheme: dark) { .pill.local { background: #312e81; color: #c7d2fe; } }
+    :root[data-theme="dark"] { .pill.local { background: #312e81; color: #c7d2fe; } }
     .pill.busy { background: #dbeafe; color: #1e40af; }
-    @media (prefers-color-scheme: dark) { .pill.busy { background: #1e3a8a; color: #bfdbfe; } }
+    :root[data-theme="dark"] { .pill.busy { background: #1e3a8a; color: #bfdbfe; } }
     .fav-btn.on { color: #f59e0b; }
     .storage-dialog { max-width: 560px; width: min(560px, 92vw); max-height: 80vh; overflow: auto; }
     .storage-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f1f5f9; }
     .storage-row .storage-muted { color: #64748b; }
     .storage-section { margin-top: 14px; margin-bottom: 2px; font-weight: 600; font-size: 13px; }
-    @media (prefers-color-scheme: dark) { .storage-row { border-bottom-color: #334155; } .storage-row .storage-muted { color: #94a3b8; } }
+    :root[data-theme="dark"] { .storage-row { border-bottom-color: #334155; } .storage-row .storage-muted { color: #94a3b8; } }
     .settings-dialog .search { display: block; width: 100%; margin: 6px 0 10px; }
+    /* Settings: path row has no divider; use an explicit separator between sections */
+    .storage-path { font-size: 13px; color: #64748b; word-break: break-all; padding: 4px 0; }
+    .settings-sep { height: 1px; background: #f1f5f9; margin: 12px 0; }
+    :root[data-theme="dark"] { .storage-path { color: #94a3b8; } .settings-sep { background: #334155; } }
+    .app-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.12); border-color: #e2e8f0; }
+    .app-row:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.12); }
+    .popmenu-sep { height: 1px; background: #e2e8f0; margin: 4px 6px; }
+    .filter-extra { flex-basis: 100%; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    :root[data-theme="dark"] { .app-card:hover { border-color: #334155; } .popmenu-sep { background: #334155; } }
   </style>
+  <script>
+    try {
+      var __t = localStorage.getItem('shinyapps.theme') || 'system';
+      if (__t === 'system') __t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', __t);
+    } catch (e) {}
+  </script>
 </head>
 <body>
   <div class="header">
@@ -207,32 +223,35 @@
         <button type="button" data-layout="list" title="List view">List</button>
       </div>
       <button id="settings-btn" class="btn" type="button" hidden>Settings</button>
-      <button id="storage-btn" class="btn" type="button" hidden>Storage</button>
       <button id="done-btn" class="btn" type="button" hidden>Back to my apps</button>
     </div>
   </div>
 
-  <div class="filters" id="filters" hidden>
+  <div class="filters" id="filters">
     <input id="search" class="search" type="search" aria-label="Search apps" placeholder="Search by name, description or author (Ctrl+F)">
-    <select id="tag-filter" class="tag-select" aria-label="Filter by tag" hidden></select>
-    <button id="clear-filters" class="link-btn" type="button" hidden>Clear</button>
+    <button id="filter-toggle" class="btn" type="button" aria-expanded="false">Filters</button>
     <button id="install-bundle-btn" class="btn" type="button">Install from file&#8230;</button>
-    <select id="sort-mode" class="tag-select" aria-label="Sort order">
-      <option value="name">Name</option>
-      <option value="recent">Recently used</option>
-    </select>
-    <button id="fav-toggle" class="btn" type="button" aria-pressed="false">&#9734; Favorites</button>
     <span id="result-count" class="result-count"></span>
+    <div class="filter-extra" id="filter-extra" hidden>
+      <select id="tag-filter" class="tag-select" aria-label="Filter by tag" hidden></select>
+      <select id="sort-mode" class="tag-select" aria-label="Sort order">
+        <option value="name">Name</option>
+        <option value="recent">Recently used</option>
+        <option value="used">Most used</option>
+      </select>
+      <button id="fav-toggle" class="btn" type="button" aria-pressed="false">&#9734; Favorites</button>
+      <button id="clear-filters" class="link-btn" type="button" hidden>Clear</button>
+    </div>
   </div>
 
-  <div class="busybar" id="busybar" hidden></div>
-  <div class="banner" id="banner" hidden></div>
+  <div class="busybar" id="busybar" role="status" aria-live="polite" hidden></div>
+  <div class="banner" id="banner" role="status" aria-live="polite" hidden></div>
   <div class="apps-grid" id="apps-grid"></div>
   <div class="empty" id="empty-state" hidden></div>
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <div class="overlay" id="overlay" hidden><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
-  <div class="overlay" id="storage-overlay" hidden><div class="dialog storage-dialog" id="storage-dialog" role="dialog" aria-modal="true"></div></div>
+
   <div class="overlay" id="settings-overlay" hidden><div class="dialog storage-dialog settings-dialog" id="settings-dialog" role="dialog" aria-modal="true"></div></div>
 
   <script>
@@ -268,6 +287,24 @@
     if (!Array.isArray(favorites)) favorites = [];
     if (!Array.isArray(recent)) recent = [];
     if (!usage || typeof usage !== 'object') usage = {};
+
+    // Theme: System / Light / Dark (persisted; applied via <html data-theme>).
+    function applyTheme() {
+      var t = 'system';
+      try { t = localStorage.getItem('shinyapps.theme') || 'system'; } catch (e) {}
+      var eff = (t === 'system')
+        ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        : t;
+      document.documentElement.setAttribute('data-theme', eff === 'dark' ? 'dark' : 'light');
+    }
+    function setTheme(mode) {
+      try { localStorage.setItem('shinyapps.theme', mode); } catch (e) {}
+      applyTheme();
+    }
+    try {
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { applyTheme(); });
+    } catch (e) {}
+    applyTheme();
     function isFav(id) { return favorites.indexOf(id) !== -1; }
     function saveFavs() { try { localStorage.setItem('shinyapps.favorites', JSON.stringify(favorites)); } catch (e) {} }
     function saveRecent() { try { localStorage.setItem('shinyapps.recent', JSON.stringify(recent)); } catch (e) {} }
@@ -364,14 +401,23 @@
 
     function sortList(list) {
       var out = sortByName(list);
-      if (sortMode !== 'recent') return out;
-      return out.slice().sort(function (a, b) {
-        var ia = recent.indexOf(a.id), ib = recent.indexOf(b.id);
-        if (ia === -1 && ib === -1) return String(a.name || a.id).localeCompare(String(b.name || b.id));
-        if (ia === -1) return 1;
-        if (ib === -1) return -1;
-        return ia - ib;
-      });
+      if (sortMode === 'recent') {
+        return out.slice().sort(function (a, b) {
+          var ia = recent.indexOf(a.id), ib = recent.indexOf(b.id);
+          if (ia === -1 && ib === -1) return String(a.name || a.id).localeCompare(String(b.name || b.id));
+          if (ia === -1) return 1;
+          if (ib === -1) return -1;
+          return ia - ib;
+        });
+      }
+      if (sortMode === 'used') {
+        return out.slice().sort(function (a, b) {
+          var ua = usage[a.id] || 0, ub = usage[b.id] || 0;
+          if (ua !== ub) return ub - ua;
+          return String(a.name || a.id).localeCompare(String(b.name || b.id));
+        });
+      }
+      return out;
     }
 
     function matchesFilters(app) {
@@ -384,7 +430,13 @@
     }
 
     function currentList() {
-      if (view === 'launcher') return sortList(installedList());
+      if (view === 'launcher') {
+        var lbase = installedList().filter(matchesFilters);
+        if (favOnly) lbase = lbase.filter(function (a) { return isFav(a.id); });
+        var lordered = sortList(lbase);
+        // Favorites first (stable sort keeps the chosen order within each group).
+        return lordered.slice().sort(function (a, b) { return (isFav(b.id) ? 1 : 0) - (isFav(a.id) ? 1 : 0); });
+      }
       var base;
       if (tab === 'installed') base = installedList();
       else if (tab === 'updates') base = updatesList();
@@ -412,12 +464,15 @@
 
     function updateChrome() {
       var manager = view === 'manager';
-      document.getElementById('manage-btn').hidden = manager;
+      var mbtn = document.getElementById('manage-btn');
+      mbtn.hidden = manager;
+      var ups = updatesList().length;
+      mbtn.textContent = 'Manage apps' + (ups ? ' (' + ups + ')' : '');
       document.getElementById('tabs').hidden = !manager;
-      document.getElementById('filters').hidden = !manager;
+      document.getElementById('filters').hidden = false;
+      document.getElementById('install-bundle-btn').hidden = !manager;
       document.getElementById('done-btn').hidden = !manager;
-      document.getElementById('storage-btn').hidden = !manager;
-      document.getElementById('settings-btn').hidden = !manager;
+      document.getElementById('settings-btn').hidden = false;
       document.getElementById('subtitle').textContent = manager ? 'Manage applications' : 'Your installed applications';
       var tabs = document.querySelectorAll('#tabs .tab');
       for (var i = 0; i < tabs.length; i++) {
@@ -429,7 +484,7 @@
         if (c) c.textContent = '(' + countFor(t) + ')';
       }
       var clearBtn = document.getElementById('clear-filters');
-      clearBtn.hidden = !(query || selectedTag);
+      clearBtn.hidden = !(query || selectedTag || favOnly);
       var sortEl = document.getElementById('sort-mode');
       if (sortEl) sortEl.value = sortMode;
       var favEl = document.getElementById('fav-toggle');
@@ -640,6 +695,7 @@
           }).catch(function () { showToast('Could not copy diagnostics', 'error'); });
         }
       } });
+      items.push({ separator: true });
       items.push({ label: 'Uninstall', danger: true, onClick: function () { confirmUninstall(app); } });
       return items;
     }
@@ -906,6 +962,12 @@
       menu.setAttribute('role', 'menu');
       menu.__anchor = anchor;
       items.forEach(function (it) {
+        if (it.separator) {
+          var sepel = document.createElement('div');
+          sepel.className = 'popmenu-sep';
+          menu.appendChild(sepel);
+          return;
+        }
         var b = document.createElement('button');
         b.type = 'button';
         b.className = 'popmenu-item' + (it.danger ? ' danger' : '');
@@ -993,8 +1055,7 @@
       });
     }
 
-    // --- Storage panel ------------------------------------------------------
-    function closeStorage() { var o = document.getElementById('storage-overlay'); if (o) o.hidden = true; }
+    // --- Storage report (used inside Settings) ------------------------------
     async function renderStorage(body) {
       var u = null;
       try { u = await window.lifecycle.getUsage(); } catch (e) {}
@@ -1023,35 +1084,8 @@
         (u.shared || []).forEach(function (s) { addLine(s.name + '  (' + s.refs + ' app' + (s.refs === 1 ? '' : 's') + ')', f(s.bytes) || '0 MB', true); });
       }
     }
-    async function doCleanup() {
-      try {
-        var r = await window.lifecycle.cleanupStorage();
-        if (r && r.busy) { showToast('A store operation is in progress.', 'error'); return; }
-        showToast('Freed ' + ((r && formatSize(r.freed)) || '0 MB'), 'success');
-        var body = document.getElementById('storage-body');
-        if (body) await renderStorage(body);
-      } catch (e) { showToast('Cleanup failed', 'error'); }
-    }
-    async function openStorage() {
-      var overlay = document.getElementById('storage-overlay');
-      var dlg = document.getElementById('storage-dialog');
-      dlg.innerHTML = '';
-      var title = document.createElement('div');
-      title.className = 'dialog-title';
-      title.textContent = 'Storage';
-      dlg.appendChild(title);
-      var body = document.createElement('div');
-      body.id = 'storage-body';
-      body.textContent = 'Loading\u2026';
-      dlg.appendChild(body);
-      var actions = document.createElement('div');
-      actions.className = 'dialog-actions';
-      actions.appendChild(makeButton('Clean up', 'primary', function () { doCleanup(); }));
-      actions.appendChild(makeButton('Close', '', closeStorage));
-      dlg.appendChild(actions);
-      overlay.hidden = false;
-      await renderStorage(body);
-    }
+
+
 
     // --- Settings -----------------------------------------------------------
     function closeSettings() { var o = document.getElementById('settings-overlay'); if (o) o.hidden = true; }
@@ -1067,6 +1101,7 @@
       title.textContent = 'Settings';
       dlg.appendChild(title);
 
+      // --- General ---
       dlg.appendChild(settingsLabel('Catalog URL'));
       var catInput = document.createElement('input');
       catInput.type = 'text';
@@ -1097,24 +1132,18 @@
       }));
       dlg.appendChild(urlRow);
 
-      dlg.appendChild(settingsLabel('App data location'));
-      var drWrap = document.createElement('div');
-      drWrap.className = 'storage-row';
-      var drText = document.createElement('span');
-      drText.className = 'storage-muted';
-      drText.style.wordBreak = 'break-all';
-      drText.textContent = (s && s.dataRoot) || '';
-      drWrap.appendChild(drText);
-      dlg.appendChild(drWrap);
-      var drRow = document.createElement('div');
-      drRow.className = 'dialog-actions';
-      drRow.appendChild(makeButton('Change\u2026', '', function () {
-        if (window.lifecycle && window.lifecycle.changeDataRoot) {
-          closeSettings();
-          window.lifecycle.changeDataRoot();
-        }
-      }));
-      dlg.appendChild(drRow);
+      dlg.appendChild(settingsLabel('Theme'));
+      var themeSel = document.createElement('select');
+      themeSel.className = 'tag-select';
+      themeSel.setAttribute('aria-label', 'Theme');
+      [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].forEach(function (opt) {
+        var o = document.createElement('option');
+        o.value = opt[0]; o.textContent = opt[1];
+        themeSel.appendChild(o);
+      });
+      try { themeSel.value = localStorage.getItem('shinyapps.theme') || 'system'; } catch (e) { themeSel.value = 'system'; }
+      themeSel.addEventListener('change', function () { setTheme(themeSel.value); });
+      dlg.appendChild(themeSel);
 
       var crashWrap = document.createElement('label');
       crashWrap.className = 'storage-row';
@@ -1128,8 +1157,50 @@
       crashWrap.appendChild(crashText); crashWrap.appendChild(crashCb);
       dlg.appendChild(crashWrap);
 
+      // --- Storage ---
+      var stSep = document.createElement('div'); stSep.className = 'settings-sep'; dlg.appendChild(stSep);
+      dlg.appendChild(settingsLabel('Storage'));
+      var stBody = document.createElement('div');
+      stBody.id = 'settings-storage-body';
+      stBody.textContent = 'Loading\u2026';
+      dlg.appendChild(stBody);
+      var stRow = document.createElement('div'); stRow.className = 'dialog-actions';
+      stRow.appendChild(makeButton('Clean up', 'primary', async function () {
+        var r = null;
+        try { r = await window.lifecycle.cleanupStorage(); } catch (e) {}
+        if (r && r.busy) { showToast('A store operation is in progress.', 'error'); return; }
+        showToast('Freed ' + ((r && formatSize(r.freed)) || '0 MB'), 'success');
+        await renderStorage(stBody);
+      }));
+      dlg.appendChild(stRow);
+      var drWrap = document.createElement('div'); drWrap.className = 'storage-path';
+      var drT = document.createElement('span');
+      drT.className = 'storage-muted';
+      drT.style.wordBreak = 'break-all';
+      drT.textContent = (s && s.dataRoot) || '';
+      drWrap.appendChild(drT);
+      dlg.appendChild(drWrap);
+      var drRow = document.createElement('div'); drRow.className = 'dialog-actions';
+      drRow.appendChild(makeButton('Change data location\u2026', 'primary', function () {
+        if (window.lifecycle && window.lifecycle.changeDataRoot) { closeSettings(); window.lifecycle.changeDataRoot(); }
+      }));
+      dlg.appendChild(drRow);
+      renderStorage(stBody);
+
+      // --- Danger zone ---
+      var dzSep = document.createElement('div'); dzSep.className = 'settings-sep'; dlg.appendChild(dzSep);
+      dlg.appendChild(settingsLabel('Danger zone'));
+      var dzRow = document.createElement('div'); dzRow.className = 'dialog-actions';
+      dzRow.appendChild(makeButton('Reset local data\u2026', 'danger', function () {
+        if (window.lifecycle && window.lifecycle.resetLocalData) { closeSettings(); window.lifecycle.resetLocalData(); }
+      }));
+      dzRow.appendChild(makeButton('Uninstall ShinyApps\u2026', 'danger', function () {
+        if (window.lifecycle && window.lifecycle.uninstallShell) { closeSettings(); window.lifecycle.uninstallShell(); }
+      }));
+      dlg.appendChild(dzRow);
+
       var actions = document.createElement('div'); actions.className = 'dialog-actions';
-      actions.appendChild(makeButton('Close', '', closeSettings));
+      actions.appendChild(makeButton('Close', 'primary', closeSettings));
       dlg.appendChild(actions);
       overlay.hidden = false;
     }
@@ -1179,6 +1250,7 @@
     document.getElementById('clear-filters').addEventListener('click', function () {
       query = '';
       selectedTag = '';
+      favOnly = false;
       document.getElementById('search').value = '';
       document.getElementById('tag-filter').value = '';
       render();
@@ -1193,8 +1265,11 @@
       if (anyInstalling()) { showToast('A store operation is in progress; please wait.', 'error'); return; }
       if (window.lifecycle && window.lifecycle.installFromFile) window.lifecycle.installFromFile();
     });
-    document.getElementById('storage-btn').addEventListener('click', function () { openStorage(); });
-    document.getElementById('storage-overlay').addEventListener('click', function (ev) { if (ev.target === this) closeStorage(); });
+    document.getElementById('filter-toggle').addEventListener('click', function () {
+      var fx = document.getElementById('filter-extra');
+      fx.hidden = !fx.hidden;
+      this.setAttribute('aria-expanded', fx.hidden ? 'false' : 'true');
+    });
     document.getElementById('settings-btn').addEventListener('click', function () { openSettings(); });
     document.getElementById('settings-overlay').addEventListener('click', function (ev) { if (ev.target === this) closeSettings(); });
     window.addEventListener('dragover', function (ev) { ev.preventDefault(); });
