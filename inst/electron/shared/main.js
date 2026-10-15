@@ -31,6 +31,7 @@ function initLogging() {
     fs.mkdirSync(logDir, { recursive: true });
     const logFile = path.join(logDir, `app-${new Date().toISOString().slice(0, 10)}.log`);
     logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    logStream.on('error', function () { /* logging is best-effort */ });
   } catch { /* logging is best-effort */ }
 }
 
@@ -67,6 +68,7 @@ function openAppLog(appId) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     appLogPath = path.join(dir, 'run-' + stamp + '.log');
     appLogStream = fs.createWriteStream(appLogPath, { flags: 'a' });
+    appLogStream.on('error', function () { /* logging is best-effort */ });
     appLogSize = 0;
     appLogAppId = appId;
     pruneAppLogs(dir);
