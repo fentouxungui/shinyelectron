@@ -598,28 +598,41 @@ function createAppStore(options) {
   }
 
   // Storage report for the launcher's Storage panel.
-  async function usage() {
+  async function usage(onProgress) {
+    const report = (typeof onProgress === 'function') ? onProgress : function () {};
+    const appEntries = Object.entries(state.apps);
+    const sharedEntries = Object.entries(state.shared || {});
+    const total = appEntries.length + sharedEntries.length + 2;   // + cache + leftovers
+    let done = 0;
+    report(0, total, 'Measuring apps\u2026');
     const apps = [];
     let appsTotal = 0;
-    for (const [id, ins] of Object.entries(state.apps)) {
+    for (const [id, ins] of appEntries) {
       let bytes = 0;
       try { bytes = await dirSize(path.join(appsDir, id)); } catch (e) {}
       appsTotal += bytes;
       apps.push({ id: id, version: ins.version, source: ins.source || '', bytes: bytes });
+      done++;
+      report(done, total, 'Measuring ' + id + '\u2026');
     }
     const shared = [];
     let sharedTotal = 0;
-    for (const [name, entry] of Object.entries(state.shared || {})) {
+    for (const [name, entry] of sharedEntries) {
       let bytes = 0;
       try { bytes = await dirSize(path.join(sharedLib, name)); } catch (e) {}
       sharedTotal += bytes;
       shared.push({ name: name, version: entry.version, refs: (entry.refs || []).length, bytes: bytes });
+      done++;
+      report(done, total, 'Measuring ' + name + '\u2026');
     }
+    report(done, total, 'Checking cache\u2026');
     let cacheBytes = 0, cacheFiles = 0;
     try {
       const files = await fsp.readdir(cacheDir);
       for (const f of files) { try { const st = await fsp.stat(path.join(cacheDir, f)); if (st.isFile()) { cacheBytes += st.size; cacheFiles++; } } catch (e) {} }
     } catch (e) {}
+    done++;
+    report(done, total, 'Scanning for leftovers\u2026');
     let staleBytes = 0, staleDirs = 0;
     try {
       const ids = await fsp.readdir(appsDir);
@@ -634,6 +647,8 @@ function createAppStore(options) {
         }
       }
     } catch (e) {}
+    done++;
+    report(done, total, 'Done');
     return {
       apps: apps.sort((a, b) => b.bytes - a.bytes),
       appsTotal: appsTotal,
@@ -649,22 +664,35 @@ function createAppStore(options) {
   }
 
   // Reclaim disk: cached archives, unreferenced shared packages, stale dirs.
-  async function cleanup() {
+  async function cleanup(onProgress) {
+    const report = (typeof onProgress === 'function') ? onProgress : function () {};
     let freed = 0;
+    let done = 0;
+    const cacheFiles = [];
     try {
       const files = await fsp.readdir(cacheDir);
       for (const f of files) {
-        const fp = path.join(cacheDir, f);
-        try { const st = await fsp.stat(fp); if (st.isFile()) { freed += st.size; await fsp.rm(fp, { force: true }); } } catch (e) {}
+        try { const st = await fsp.stat(path.join(cacheDir, f)); if (st.isFile()) cacheFiles.push({ name: f, size: st.size }); } catch (e) {}
       }
     } catch (e) {}
-    for (const name of Object.keys(state.shared || {})) {
-      const entry = state.shared[name];
-      if (entry && entry.refs && entry.refs.length === 0) {
-        try { const sp = path.join(sharedLib, name); freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); delete state.shared[name]; } catch (e) {}
-      }
+    const orphanShared = Object.keys(state.shared || {}).filter(function (n) {
+      const e = state.shared[n];
+      return e && e.refs && e.refs.length === 0;
+    });
+    const total = cacheFiles.length + orphanShared.length;
+    report(0, total, total ? 'Cleaning up\u2026' : 'Nothing to clean');
+    for (const cf of cacheFiles) {
+      try { await fsp.rm(path.join(cacheDir, cf.name), { force: true }); freed += cf.size; } catch (e) {}
+      done++;
+      report(done, total, 'Removing cache file\u2026');
+    }
+    for (const name of orphanShared) {
+      try { const sp = path.join(sharedLib, name); freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); delete state.shared[name]; } catch (e) {}
+      done++;
+      report(done, total, 'Removing unused package ' + name + '\u2026');
     }
     saveState();
+    report(done, total, 'Finalizing\u2026');
     try {
       const ids = await fsp.readdir(appsDir);
       for (const id of ids) {
@@ -685,14 +713,31 @@ function createAppStore(options) {
   // Reset all local store data: stop/cancel everything, remove installed apps,
   // the shared/private libraries and the download cache, and clear state.
   // The shell itself and user settings are untouched.
-  async function resetLocal() {
+  async function resetLocal(onProgress) {
+    const report = (typeof onProgress === 'function') ? onProgress : function () {};
+    report(0, 0, 'Stopping running apps\u2026');
     await stopAll();
-    for (const d of [appsDir, sharedLib, privateRoot, cacheDir]) {
+    const appIds = Object.keys(state.apps || {});
+    const total = appIds.length + 3;   // per-app dirs + shared/private/cache sweeps
+    let done = 0;
+    for (const id of appIds) {
+      report(done, total, 'Removing ' + id + '\u2026');
+      try { await fsp.rm(path.join(appsDir, id), { recursive: true, force: true }); } catch (e) {}
+      done++;
+      report(done, total, 'Removed ' + id);
+    }
+    // Sweep anything still under apps/ (staging/incoming), then recreate the dirs.
+    try { await fsp.rm(appsDir, { recursive: true, force: true }); } catch (e) {}
+    try { fs.mkdirSync(appsDir, { recursive: true }); } catch (e) {}
+    for (const d of [sharedLib, privateRoot, cacheDir]) {
+      report(done, total, 'Clearing data\u2026');
       try { await fsp.rm(d, { recursive: true, force: true }); } catch (e) {}
       try { fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+      done++;
     }
     state = { schema: 1, apps: {}, shared: {} };
     saveState();
+    report(total, total, 'Done');
   }
 
   return {

@@ -14,6 +14,7 @@ CONFIG_PATH_KEYS <- list(
   c("icons", "linux"),
   c("splash", "image"),
   c("tray", "icon"),
+  c("menu", "user_guide"),
   c("signing", "win", "certificate_file")
 )
 
@@ -241,7 +242,9 @@ missing_config_files <- function(config) {
     list(key = c("splash", "image"),
          consequence = "The splash screen shows the app's initial instead."),
     list(key = c("tray", "icon"),
-         consequence = "The tray uses the app icon instead.")
+         consequence = "The tray uses the app icon instead."),
+    list(key = c("menu", "user_guide"),
+         consequence = "Help > User Guide is omitted.")
   )
 
   missing <- list()

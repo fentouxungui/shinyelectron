@@ -50,6 +50,7 @@ process_templates <- function(output_dir, app_name, app_type,
   )
 
   render_shared_templates(output_dir, template_vars, is_multi_app)
+  copy_user_guide(output_dir, config)
   copy_backend_modules(output_dir, backend_module, is_multi_app)
 
   if (runtime_strategy == "container") {
@@ -75,6 +76,22 @@ process_templates <- function(output_dir, app_name, app_type,
   copy_installer_license(output_dir, config)
 
   if (verbose) cli::cli_alert_success("Processed Electron templates")
+}
+
+#' Copy the configured user-guide page into the build
+#'
+#' `menu.user_guide` names a self-contained HTML page that is copied to the
+#' project root as-is and listed in the electron-builder `files`, so the shell
+#' can open it in the in-app reader window (Help > User Guide).
+#'
+#' @param output_dir Character. The Electron project directory.
+#' @param config List. The configuration.
+#' @keywords internal
+copy_user_guide <- function(output_dir, config) {
+  guide <- config$menu$user_guide
+  if (is.null(guide) || !nzchar(guide) || !fs::file_exists(guide)) return(invisible(NULL))
+  fs::file_copy(guide, fs::path(output_dir, basename(guide)), overwrite = TRUE)
+  invisible(NULL)
 }
 
 #' Resolve the active _brand.yml for template rendering

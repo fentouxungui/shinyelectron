@@ -128,6 +128,9 @@
     .dialog-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
     .dialog-msg { font-size: 13px; color: #475569; line-height: 1.5; margin-bottom: 18px; }
     .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .busy-dialog { text-align: center; }
+    .progress.indeterminate > i { width: 30% !important; transition: none; animation: busy-slide 1.1s ease-in-out infinite; }
+    @keyframes busy-slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
     /* Toasts */
     .toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 1200; }
     .toast { background: #1e293b; color: #fff; font-size: 13px; padding: 10px 14px; border-radius: 9px; box-shadow: 0 8px 20px rgba(15,23,42,.25); opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; max-width: 340px; }
@@ -180,6 +183,7 @@
     :root[data-theme="dark"] { .pill.busy { background: #1e3a8a; color: #bfdbfe; } }
     .fav-btn.on { color: #f59e0b; }
     .storage-dialog { max-width: 560px; width: min(560px, 92vw); max-height: 80vh; overflow: auto; }
+    .storage-dialog .dialog-actions { margin-top: 16px; }
     .storage-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f1f5f9; }
     .storage-row .storage-muted { color: #64748b; }
     .storage-section { margin-top: 14px; margin-bottom: 2px; font-weight: 600; font-size: 13px; }
@@ -221,7 +225,6 @@
         <button type="button" data-layout="card" title="Card view">Cards</button>
         <button type="button" data-layout="list" title="List view">List</button>
       </div>
-      <button id="settings-btn" class="btn" type="button" hidden>Settings</button>
       <button id="done-btn" class="btn" type="button" hidden>Back to my apps</button>
     </div>
   </div>
@@ -250,6 +253,14 @@
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <div class="overlay" id="overlay" hidden><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
+
+  <div class="overlay" id="busy-overlay" hidden>
+    <div class="dialog busy-dialog" role="dialog" aria-modal="true" aria-labelledby="busy-title">
+      <div class="dialog-title" id="busy-title">Working&#8230;</div>
+      <div class="dialog-msg" id="busy-status" role="status" aria-live="polite">Preparing&#8230;</div>
+      <div class="progress" id="busy-progress"><i id="busy-bar"></i></div>
+    </div>
+  </div>
 
 
   <script>
@@ -390,6 +401,7 @@
     function runningList() { return model.filter(function (a) { return a.running; }); }
     var bundleBusy = false;
     var bundleStatus = '';
+    var bundlePercent = 0;
     function anyInstalling() { return bundleBusy || model.some(function (a) { return a.state === 'installing' || a.state === 'queued'; }); }
 
     function sortByName(list) {
@@ -471,7 +483,6 @@
       document.getElementById('filters').hidden = false;
       document.getElementById('install-bundle-btn').hidden = !manager;
       document.getElementById('done-btn').hidden = !manager;
-      document.getElementById('settings-btn').hidden = false;
       document.getElementById('subtitle').textContent = manager ? 'Manage applications' : 'Your installed applications';
       var tabs = document.querySelectorAll('#tabs .tab');
       for (var i = 0; i < tabs.length; i++) {
@@ -836,11 +847,25 @@
       var busybar = document.getElementById('busybar');
       var busy = anyInstalling();
       busybar.hidden = !busy;
+      busybar.innerHTML = '';
       if (busy) {
         var ba = model.filter(function (a) { return a.state === 'installing' || a.state === 'queued'; })[0];
-        busybar.textContent = bundleBusy
+        var btext = document.createElement('span');
+        btext.style.flex = '1';
+        btext.textContent = bundleBusy
           ? ('Installing from bundle \u2014 ' + (bundleStatus || 'please wait') + ' \u2014 do not start other tasks.')
           : (opVerb(ba && ba.op) + ' ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks. ');
+        busybar.appendChild(btext);
+        if (bundleBusy && bundlePercent > 0) {
+          var bp = document.createElement('div');
+          bp.className = 'progress';
+          bp.style.flex = '0 0 160px';
+          bp.style.marginTop = '0';
+          var bi = document.createElement('i');
+          bi.style.width = bundlePercent + '%';
+          bp.appendChild(bi);
+          busybar.appendChild(bp);
+        }
         if (!bundleBusy) {
           busybar.appendChild(makeButton('Cancel', 'danger', function () { if (window.lifecycle && window.lifecycle.cancelInstall) window.lifecycle.cancelInstall(); }));
         }
@@ -1056,9 +1081,35 @@
     }
 
     // --- Storage report (used inside Settings) ------------------------------
+    var usageProgressEls = null;
+    function showUsageProgress(body, label) {
+      body.innerHTML = '';
+      var st = document.createElement('div');
+      st.className = 'dialog-msg';
+      st.textContent = label || 'Loading\u2026';
+      var wrap = document.createElement('div');
+      wrap.className = 'progress indeterminate';
+      var bar = document.createElement('i');
+      wrap.appendChild(bar);
+      body.appendChild(st);
+      body.appendChild(wrap);
+      usageProgressEls = { status: st, bar: bar, wrap: wrap };
+    }
+    function updateUsageProgress(done, total, label) {
+      if (!usageProgressEls) return;
+      if (label) usageProgressEls.status.textContent = label;
+      if (total && total > 0) {
+        usageProgressEls.wrap.classList.remove('indeterminate');
+        usageProgressEls.bar.style.width = Math.max(4, Math.round((done / total) * 100)) + '%';
+      } else {
+        usageProgressEls.wrap.classList.add('indeterminate');
+      }
+    }
     async function renderStorage(body) {
+      showUsageProgress(body, 'Loading\u2026');
       var u = null;
       try { u = await window.lifecycle.getUsage(); } catch (e) {}
+      usageProgressEls = null;
       body.innerHTML = '';
       if (!u) { body.textContent = 'Could not read storage info.'; return; }
       function addLine(label, value, muted) {
@@ -1205,20 +1256,31 @@
       renderStorage(body);
     }
 
-    // In-app Settings button: the same actions in a lightweight popup menu.
-    function openSettingsMenu(anchor) {
-      openPopmenu(anchor, [
-        { label: 'Manage apps\u2026', onClick: function () { setView('manager'); } },
-        { label: 'Install from file\u2026', onClick: function () { if (anyInstalling()) { showToast('A store operation is in progress; please wait.', 'error'); return; } if (window.lifecycle.installFromFile) window.lifecycle.installFromFile(); } },
-        { label: 'Install from URL\u2026', onClick: openInstallUrlDialog },
-        { separator: true },
-        { label: 'Catalog URL\u2026', onClick: openCatalogDialog },
-        { label: 'App data location\u2026', onClick: function () { if (window.lifecycle && window.lifecycle.changeDataRoot) window.lifecycle.changeDataRoot(); } },
-        { label: 'Storage\u2026', onClick: openStorageDialog },
-        { separator: true },
-        { label: 'Reset local data\u2026', danger: true, onClick: function () { if (window.lifecycle && window.lifecycle.resetLocalData) window.lifecycle.resetLocalData(); } },
-        { label: 'Uninstall ShinyApps\u2026', danger: true, onClick: function () { if (window.lifecycle && window.lifecycle.uninstallShell) window.lifecycle.uninstallShell(); } }
-      ]);
+
+    // --- Busy / progress overlay (Reset, Clean up, ...) ---------------------
+    function showBusyOverlay(title) {
+      var t = document.getElementById('busy-title');
+      if (t && title) t.textContent = title;
+      var o = document.getElementById('busy-overlay');
+      if (o) o.hidden = false;
+      setBusyProgress(0, 0, 'Preparing\u2026');
+    }
+    function setBusyProgress(done, total, label) {
+      var st = document.getElementById('busy-status');
+      if (st && label) st.textContent = label;
+      var wrap = document.getElementById('busy-progress');
+      var bar = document.getElementById('busy-bar');
+      if (!wrap || !bar) return;
+      if (total && total > 0) {
+        wrap.classList.remove('indeterminate');
+        bar.style.width = Math.max(4, Math.round((done / total) * 100)) + '%';
+      } else {
+        wrap.classList.add('indeterminate');
+      }
+    }
+    function hideBusyOverlay() {
+      var o = document.getElementById('busy-overlay');
+      if (o) o.hidden = true;
     }
 
     // --- Toasts -------------------------------------------------------------
@@ -1286,7 +1348,6 @@
       fx.hidden = !fx.hidden;
       this.setAttribute('aria-expanded', fx.hidden ? 'false' : 'true');
     });
-    document.getElementById('settings-btn').addEventListener('click', function () { openSettingsMenu(this); });
     window.addEventListener('dragover', function (ev) { ev.preventDefault(); });
     window.addEventListener('drop', function (ev) {
       ev.preventDefault();
@@ -1346,6 +1407,14 @@
           setTheme(cmd.theme === 'light' || cmd.theme === 'dark' ? cmd.theme : 'system');
         } else if (cmd.cmd === 'refresh') {
           refresh();
+        } else if (cmd.cmd === 'usage_progress') {
+          updateUsageProgress(cmd.done, cmd.total, cmd.label);
+        } else if (cmd.cmd === 'busy_begin') {
+          showBusyOverlay(cmd.title);
+        } else if (cmd.cmd === 'busy_progress') {
+          setBusyProgress(cmd.done, cmd.total, cmd.label);
+        } else if (cmd.cmd === 'busy_done') {
+          hideBusyOverlay();
         } else if (cmd.cmd === 'run' && cmd.appId && window.lifecycle.runApp) {
           window.lifecycle.runApp(cmd.appId);
         }
@@ -1370,9 +1439,10 @@
           return;
         }
         if (ev.id === '__bundle__') {
-          if (ev.state === 'installing') { bundleBusy = true; bundleStatus = ev.statusText || ev.step || ''; render(); return; }
+          if (ev.state === 'installing') { bundleBusy = true; bundleStatus = ev.statusText || ev.step || ''; if (typeof ev.percent === 'number') bundlePercent = ev.percent; render(); return; }
           bundleBusy = false;
           bundleStatus = '';
+          bundlePercent = 0;
           render();
           if (ev.state === 'error') showToast(ev.message || ('Bundle install failed' + (ev.error ? ': ' + ev.error : '')), 'error');
           else showToast(ev.message || 'Bundle installed', 'success');

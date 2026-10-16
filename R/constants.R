@@ -105,7 +105,8 @@ SHINYELECTRON_DEFAULTS <- list(
     enabled = TRUE,
     template = "default",  # "default" or "minimal"
     show_dev_tools = FALSE,
-    help_url = NULL
+    help_url = NULL,
+    user_guide = NULL   # Optional bundled user-guide page (Help > User Guide)
   ),
 
   # Auto-update defaults

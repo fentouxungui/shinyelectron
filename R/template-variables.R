@@ -79,6 +79,9 @@ generate_template_variables <- function(app_name, app_slug, app_type,
   # assets/, so the template carries only the file name.
   tray_icon <- if (!is.null(config$tray$icon)) basename(config$tray$icon) else icon_file
   help_url <- config$menu$help_url %||% ""
+  # menu.user_guide names a self-contained HTML page the shell opens in the
+  # in-app reader window; the template carries only its file name.
+  user_guide_file <- if (!is.null(config$menu$user_guide)) basename(config$menu$user_guide) else ""
   log_level <- config$app$log_level %||% SHINYELECTRON_DEFAULTS$logging$log_level
   log_dir <- config$app$log_dir %||% ""
   preloader_background <- config$preloader$background %||%
@@ -147,6 +150,8 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     # whisker renders a section for "", so gate Help > Documentation on a
     # real URL rather than on the value itself.
     has_help_url = is_nonempty_string(config$menu$help_url),
+    user_guide_file_js = js_str(user_guide_file),
+    has_user_guide = is_nonempty_string(user_guide_file),
 
     # Auto-updates
     updates_enabled = config$updates$enabled %||% SHINYELECTRON_DEFAULTS$updates$enabled,
