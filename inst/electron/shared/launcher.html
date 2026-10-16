@@ -187,8 +187,7 @@
     .settings-dialog .search { display: block; width: 100%; margin: 6px 0 10px; }
     /* Settings: path row has no divider; use an explicit separator between sections */
     .storage-path { font-size: 13px; color: #64748b; word-break: break-all; padding: 4px 0; }
-    .settings-sep { height: 1px; background: #f1f5f9; margin: 12px 0; }
-    :root[data-theme="dark"] { .storage-path { color: #94a3b8; } .settings-sep { background: #334155; } }
+    :root[data-theme="dark"] { .storage-path { color: #94a3b8; } }
     .app-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.12); border-color: #e2e8f0; }
     .app-row:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.12); }
     .popmenu-sep { height: 1px; background: #e2e8f0; margin: 4px 6px; }
@@ -252,7 +251,6 @@
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <div class="overlay" id="overlay" hidden><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
 
-  <div class="overlay" id="settings-overlay" hidden><div class="dialog storage-dialog settings-dialog" id="settings-dialog" role="dialog" aria-modal="true"></div></div>
 
   <script>
     var model = [];
@@ -275,14 +273,14 @@
     var favorites = [];
     var recent = [];
     var usage = {};           // { appId: runCount }
-    var sortMode = 'name';    // 'name' | 'recent'
+    var sortMode = 'name';    // 'name' | 'recent' | 'used'
     var favOnly = false;
     try {
       favorites = JSON.parse(localStorage.getItem('shinyapps.favorites') || '[]');
       recent = JSON.parse(localStorage.getItem('shinyapps.recent') || '[]');
       usage = JSON.parse(localStorage.getItem('shinyapps.usage') || '{}');
       var savedSort = localStorage.getItem('shinyapps.sort');
-      if (savedSort === 'name' || savedSort === 'recent') sortMode = savedSort;
+      if (savedSort === 'name' || savedSort === 'recent' || savedSort === 'used') sortMode = savedSort;
     } catch (e) {}
     if (!Array.isArray(favorites)) favorites = [];
     if (!Array.isArray(recent)) recent = [];
@@ -296,6 +294,7 @@
         ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
         : t;
       document.documentElement.setAttribute('data-theme', eff === 'dark' ? 'dark' : 'light');
+      if (window.lifecycle && window.lifecycle.notifyTheme) window.lifecycle.notifyTheme(t);
     }
     function setTheme(mode) {
       try { localStorage.setItem('shinyapps.theme', mode); } catch (e) {}
@@ -346,7 +345,7 @@
       window.lifecycle.setQuickRunOrder({ order: ordered.map(function (a) { return a.id; }), favorites: favorites.slice() });
     }
     function setSortMode(m) {
-      if (m !== 'name' && m !== 'recent') return;
+      if (m !== 'name' && m !== 'recent' && m !== 'used') return;
       sortMode = m;
       try { localStorage.setItem('shinyapps.sort', sortMode); } catch (e) {}
       render();
@@ -1003,7 +1002,7 @@
       if (ev.key !== 'Tab') return;
       var d = document.getElementById('dialog');
       if (!d) return;
-      var f = d.querySelectorAll('button');
+      var f = d.querySelectorAll('button, input, select, textarea, a[href]');
       if (!f.length) return;
       var first = f[0], last = f[f.length - 1];
       if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
@@ -1013,13 +1012,14 @@
       var o = document.getElementById('overlay');
       if (o) o.hidden = true;
       var d = document.getElementById('dialog');
-      if (d) d.innerHTML = '';
+      if (d) { d.innerHTML = ''; d.className = 'dialog'; }
       document.removeEventListener('keydown', confirmEsc);
       document.removeEventListener('keydown', dialogTab);
     }
     function showConfirm(opts) {
       var overlay = document.getElementById('overlay');
       var dialog = document.getElementById('dialog');
+      dialog.className = 'dialog';
       dialog.innerHTML = '';
       var h = document.createElement('div');
       h.className = 'dialog-title';
@@ -1087,122 +1087,138 @@
 
 
 
-    // --- Settings -----------------------------------------------------------
-    function closeSettings() { var o = document.getElementById('settings-overlay'); if (o) o.hidden = true; }
-    function settingsLabel(text) { var d = document.createElement('div'); d.className = 'storage-section'; d.textContent = text; return d; }
-    async function openSettings() {
-      var overlay = document.getElementById('settings-overlay');
-      var dlg = document.getElementById('settings-dialog');
+    // --- Settings (small focused dialogs; one per native Settings-menu item) ---
+
+    // A one-field dialog: title + optional message + input + Cancel/Save.
+    function openPromptDialog(opts) {
+      var overlay = document.getElementById('overlay');
+      var dlg = document.getElementById('dialog');
+      dlg.className = 'dialog settings-dialog';
       dlg.innerHTML = '';
+      var title = document.createElement('div');
+      title.className = 'dialog-title'; title.id = 'dialog-title'; title.textContent = opts.title;
+      dlg.appendChild(title);
+      dlg.setAttribute('aria-labelledby', 'dialog-title');
+      if (opts.message) {
+        var msg = document.createElement('div'); msg.className = 'dialog-msg'; msg.textContent = opts.message;
+        dlg.appendChild(msg);
+      }
+      var input = document.createElement('input');
+      input.type = 'text'; input.className = 'search';
+      input.value = opts.value || '';
+      if (opts.placeholder) input.placeholder = opts.placeholder;
+      dlg.appendChild(input);
+      var errEl = document.createElement('div');
+      errEl.className = 'dialog-msg';
+      errEl.style.color = '#b91c1c';
+      errEl.style.minHeight = '1px';
+      dlg.appendChild(errEl);
+      var row = document.createElement('div'); row.className = 'dialog-actions';
+      row.appendChild(makeButton(opts.cancelLabel || 'Cancel', '', closeConfirm));
+      var ok = makeButton(opts.confirmLabel || 'Save', opts.danger ? 'danger' : 'primary', async function () {
+        var res = await opts.onConfirm(input.value.trim(), errEl);
+        if (res === false) { input.focus(); return; }
+        closeConfirm();
+      });
+      row.appendChild(ok);
+      dlg.appendChild(row);
+      overlay.hidden = false;
+      setTimeout(function () { input.focus(); input.select(); }, 0);
+      input.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); ok.click(); } });
+      document.addEventListener('keydown', confirmEsc);
+      document.addEventListener('keydown', dialogTab);
+    }
+
+    async function openCatalogDialog() {
       var s = null;
       try { s = await window.lifecycle.getSettings(); } catch (e) {}
-      var title = document.createElement('div');
-      title.className = 'dialog-title';
-      title.textContent = 'Settings';
-      dlg.appendChild(title);
-
-      // --- General ---
-      dlg.appendChild(settingsLabel('Catalog URL'));
-      var catInput = document.createElement('input');
-      catInput.type = 'text';
-      catInput.className = 'search';
-      catInput.value = (s && s.catalogUrl) || '';
-      dlg.appendChild(catInput);
-      var catRow = document.createElement('div'); catRow.className = 'dialog-actions';
-      catRow.appendChild(makeButton('Save catalog URL', 'primary', async function () {
-        var r = null;
-        try { r = await window.lifecycle.setCatalogUrl(catInput.value); } catch (e) {}
-        if (r && r.ok) { showToast('Catalog URL saved', 'success'); refresh(); }
-        else { showToast((r && r.error) || 'Could not save catalog URL', 'error'); }
-      }));
-      dlg.appendChild(catRow);
-
-      dlg.appendChild(settingsLabel('Install bundle from URL'));
-      var urlInput = document.createElement('input');
-      urlInput.type = 'text';
-      urlInput.className = 'search';
-      urlInput.placeholder = 'https://\u2026/app-1.0.0-win-x64.zip';
-      dlg.appendChild(urlInput);
-      var urlRow = document.createElement('div'); urlRow.className = 'dialog-actions';
-      urlRow.appendChild(makeButton('Install from URL', 'primary', function () {
-        var u = urlInput.value.trim();
-        if (!u) return;
-        closeSettings();
-        if (window.lifecycle.installFromUrl) window.lifecycle.installFromUrl(u);
-      }));
-      dlg.appendChild(urlRow);
-
-      dlg.appendChild(settingsLabel('Theme'));
-      var themeSel = document.createElement('select');
-      themeSel.className = 'tag-select';
-      themeSel.setAttribute('aria-label', 'Theme');
-      [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].forEach(function (opt) {
-        var o = document.createElement('option');
-        o.value = opt[0]; o.textContent = opt[1];
-        themeSel.appendChild(o);
+      openPromptDialog({
+        title: 'Catalog URL',
+        message: 'The app catalog (JSON) this store loads. Leave empty to use the default.',
+        value: (s && s.catalogUrl) || '',
+        placeholder: (s && s.defaultCatalogUrl) || 'https://\u2026/catalog.json',
+        confirmLabel: 'Save',
+        onConfirm: async function (val, errEl) {
+          var r = null;
+          try { r = await window.lifecycle.setCatalogUrl(val); } catch (e) {}
+          if (r && r.ok) { showToast('Catalog URL saved', 'success'); refresh(); return true; }
+          errEl.textContent = (r && r.error) || 'Could not save catalog URL';
+          return false;
+        }
       });
-      try { themeSel.value = localStorage.getItem('shinyapps.theme') || 'system'; } catch (e) { themeSel.value = 'system'; }
-      themeSel.addEventListener('change', function () { setTheme(themeSel.value); });
-      dlg.appendChild(themeSel);
+    }
 
-      var crashWrap = document.createElement('label');
-      crashWrap.className = 'storage-row';
-      var crashText = document.createElement('span');
-      crashText.className = 'storage-muted';
-      crashText.textContent = 'Save crash reports locally (never uploaded)';
-      var crashCb = document.createElement('input');
-      crashCb.type = 'checkbox';
-      crashCb.checked = !!(s && s.crashReporting);
-      crashCb.addEventListener('change', function () { if (window.lifecycle.setCrashReporting) window.lifecycle.setCrashReporting(crashCb.checked); });
-      crashWrap.appendChild(crashText); crashWrap.appendChild(crashCb);
-      dlg.appendChild(crashWrap);
+    function openInstallUrlDialog() {
+      openPromptDialog({
+        title: 'Install from URL',
+        message: 'Paste a direct link to an app bundle (.zip).',
+        placeholder: 'https://\u2026/app-1.0.0-win-x64.zip',
+        confirmLabel: 'Install',
+        onConfirm: function (val, errEl) {
+          if (!val) { errEl.textContent = 'Enter a URL.'; return false; }
+          if (!/^https?:\/\//i.test(val)) { errEl.textContent = 'URL must start with http:// or https://'; return false; }
+          if (window.lifecycle.installFromUrl) window.lifecycle.installFromUrl(val);
+          return true;
+        }
+      });
+    }
 
-      // --- Storage ---
-      var stSep = document.createElement('div'); stSep.className = 'settings-sep'; dlg.appendChild(stSep);
-      dlg.appendChild(settingsLabel('Storage'));
-      var stBody = document.createElement('div');
-      stBody.id = 'settings-storage-body';
-      stBody.textContent = 'Loading\u2026';
-      dlg.appendChild(stBody);
-      var stRow = document.createElement('div'); stRow.className = 'dialog-actions';
-      stRow.appendChild(makeButton('Clean up', 'primary', async function () {
+    async function openStorageDialog() {
+      var overlay = document.getElementById('overlay');
+      var dlg = document.getElementById('dialog');
+      dlg.className = 'dialog storage-dialog';
+      dlg.innerHTML = '';
+      var title = document.createElement('div');
+      title.className = 'dialog-title'; title.id = 'dialog-title'; title.textContent = 'Storage';
+      dlg.appendChild(title);
+      dlg.setAttribute('aria-labelledby', 'dialog-title');
+      var s = null;
+      try { s = await window.lifecycle.getSettings(); } catch (e) {}
+      if (s && s.dataRoot) {
+        var pth = document.createElement('div'); pth.className = 'storage-path';
+        pth.textContent = 'Location: ' + s.dataRoot;
+        dlg.appendChild(pth);
+      }
+      var body = document.createElement('div');
+      body.textContent = 'Loading\u2026';
+      dlg.appendChild(body);
+      var row = document.createElement('div'); row.className = 'dialog-actions';
+      row.appendChild(makeButton('Clean up', 'primary', async function () {
         var r = null;
         try { r = await window.lifecycle.cleanupStorage(); } catch (e) {}
         if (r && r.busy) { showToast('A store operation is in progress.', 'error'); return; }
         showToast('Freed ' + ((r && formatSize(r.freed)) || '0 MB'), 'success');
-        await renderStorage(stBody);
+        await renderStorage(body);
       }));
-      dlg.appendChild(stRow);
-      var drWrap = document.createElement('div'); drWrap.className = 'storage-path';
-      var drT = document.createElement('span');
-      drT.className = 'storage-muted';
-      drT.style.wordBreak = 'break-all';
-      drT.textContent = (s && s.dataRoot) || '';
-      drWrap.appendChild(drT);
-      dlg.appendChild(drWrap);
-      var drRow = document.createElement('div'); drRow.className = 'dialog-actions';
-      drRow.appendChild(makeButton('Change data location\u2026', 'primary', function () {
-        if (window.lifecycle && window.lifecycle.changeDataRoot) { closeSettings(); window.lifecycle.changeDataRoot(); }
+      row.appendChild(makeButton('Open folder', '', function () {
+        if (window.lifecycle && window.lifecycle.openDataRoot) window.lifecycle.openDataRoot();
       }));
-      dlg.appendChild(drRow);
-      renderStorage(stBody);
-
-      // --- Danger zone ---
-      var dzSep = document.createElement('div'); dzSep.className = 'settings-sep'; dlg.appendChild(dzSep);
-      dlg.appendChild(settingsLabel('Danger zone'));
-      var dzRow = document.createElement('div'); dzRow.className = 'dialog-actions';
-      dzRow.appendChild(makeButton('Reset local data\u2026', 'danger', function () {
-        if (window.lifecycle && window.lifecycle.resetLocalData) { closeSettings(); window.lifecycle.resetLocalData(); }
+      row.appendChild(makeButton('Change data location\u2026', '', function () {
+        closeConfirm();
+        if (window.lifecycle && window.lifecycle.changeDataRoot) window.lifecycle.changeDataRoot();
       }));
-      dzRow.appendChild(makeButton('Uninstall ShinyApps\u2026', 'danger', function () {
-        if (window.lifecycle && window.lifecycle.uninstallShell) { closeSettings(); window.lifecycle.uninstallShell(); }
-      }));
-      dlg.appendChild(dzRow);
-
-      var actions = document.createElement('div'); actions.className = 'dialog-actions';
-      actions.appendChild(makeButton('Close', 'primary', closeSettings));
-      dlg.appendChild(actions);
+      row.appendChild(makeButton('Close', 'primary', closeConfirm));
+      dlg.appendChild(row);
       overlay.hidden = false;
+      document.addEventListener('keydown', confirmEsc);
+      document.addEventListener('keydown', dialogTab);
+      renderStorage(body);
+    }
+
+    // In-app Settings button: the same actions in a lightweight popup menu.
+    function openSettingsMenu(anchor) {
+      openPopmenu(anchor, [
+        { label: 'Manage apps\u2026', onClick: function () { setView('manager'); } },
+        { label: 'Install from file\u2026', onClick: function () { if (anyInstalling()) { showToast('A store operation is in progress; please wait.', 'error'); return; } if (window.lifecycle.installFromFile) window.lifecycle.installFromFile(); } },
+        { label: 'Install from URL\u2026', onClick: openInstallUrlDialog },
+        { separator: true },
+        { label: 'Catalog URL\u2026', onClick: openCatalogDialog },
+        { label: 'App data location\u2026', onClick: function () { if (window.lifecycle && window.lifecycle.changeDataRoot) window.lifecycle.changeDataRoot(); } },
+        { label: 'Storage\u2026', onClick: openStorageDialog },
+        { separator: true },
+        { label: 'Reset local data\u2026', danger: true, onClick: function () { if (window.lifecycle && window.lifecycle.resetLocalData) window.lifecycle.resetLocalData(); } },
+        { label: 'Uninstall ShinyApps\u2026', danger: true, onClick: function () { if (window.lifecycle && window.lifecycle.uninstallShell) window.lifecycle.uninstallShell(); } }
+      ]);
     }
 
     // --- Toasts -------------------------------------------------------------
@@ -1270,8 +1286,7 @@
       fx.hidden = !fx.hidden;
       this.setAttribute('aria-expanded', fx.hidden ? 'false' : 'true');
     });
-    document.getElementById('settings-btn').addEventListener('click', function () { openSettings(); });
-    document.getElementById('settings-overlay').addEventListener('click', function (ev) { if (ev.target === this) closeSettings(); });
+    document.getElementById('settings-btn').addEventListener('click', function () { openSettingsMenu(this); });
     window.addEventListener('dragover', function (ev) { ev.preventDefault(); });
     window.addEventListener('drop', function (ev) {
       ev.preventDefault();
@@ -1319,8 +1334,18 @@
           if (view === 'manager') render(); else setView('manager');
         } else if (cmd.cmd === 'install_bundle') {
           if (window.lifecycle.installFromFile) window.lifecycle.installFromFile();
-        } else if (cmd.cmd === 'settings') {
-          openSettings();
+        } else if (cmd.cmd === 'install_url') {
+          openInstallUrlDialog();
+        } else if (cmd.cmd === 'catalog') {
+          openCatalogDialog();
+        } else if (cmd.cmd === 'storage') {
+          openStorageDialog();
+        } else if (cmd.cmd === 'data_root') {
+          if (window.lifecycle.changeDataRoot) window.lifecycle.changeDataRoot();
+        } else if (cmd.cmd === 'set_theme') {
+          setTheme(cmd.theme === 'light' || cmd.theme === 'dark' ? cmd.theme : 'system');
+        } else if (cmd.cmd === 'refresh') {
+          refresh();
         } else if (cmd.cmd === 'run' && cmd.appId && window.lifecycle.runApp) {
           window.lifecycle.runApp(cmd.appId);
         }

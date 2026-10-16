@@ -221,14 +221,28 @@ async function wipeAllLocalData() {
     try { fs.rmSync(path.join(userData, t), { recursive: true, force: true }); } catch (e) {}
   }
 }
+function runningStoreApps() {
+  if (!appStore) return [];
+  const out = [];
+  try {
+    const st = appStore.getState();
+    const apps = (st && st.apps) || {};
+    for (const id of Object.keys(apps)) {
+      if (appStore.isRunning(id)) out.push((apps[id].meta && apps[id].meta.name) || id);
+    }
+  } catch (e) {}
+  return out;
+}
 async function uninstallShinyApps() {
   const { dialog } = require('electron');
   const name = shellDisplayName();
+  const runningUn = runningStoreApps();
   const first = await dialog.showMessageBox(mainWindow, {
     type: 'warning', noLink: true,
     title: 'Uninstall ' + name,
     message: 'Uninstall ' + name + '?',
-    detail: 'Choose whether to also remove installed applications and all local data.',
+    detail: 'Choose whether to also remove installed applications and all local data.' +
+      (runningUn.length ? ('\n\nRunning now: ' + runningUn.join(', ') + ' (will be stopped).') : ''),
     buttons: ['Uninstall', 'Uninstall and remove all apps & data', 'Cancel'],
     defaultId: 2, cancelId: 2
   });
@@ -276,11 +290,13 @@ async function uninstallShinyApps() {
 }
 async function resetLocalData() {
   const { dialog } = require('electron');
+  const runningReset = runningStoreApps();
   const r = await dialog.showMessageBox(mainWindow, {
     type: 'warning', noLink: true,
     title: 'Reset local data',
     message: 'Remove all installed apps, shared packages, caches and logs?',
-    detail: shellDisplayName() + ' stays installed. Your settings (e.g. catalog URL) are kept.',
+    detail: shellDisplayName() + ' stays installed. Your settings (e.g. catalog URL) are kept.' +
+      (runningReset.length ? ('\n\nRunning now: ' + runningReset.join(', ') + ' (will be stopped).') : ''),
     buttons: ['Reset', 'Cancel'], defaultId: 1, cancelId: 1
   });
   if (r.response !== 0) return;
@@ -343,6 +359,8 @@ let lastSelectedAppId = null;
 let sharedShinyliveServer = null;
 let sharedShinylivePort = null;
 let isLauncherVisible = true;   // true while the launcher page is shown (multi-app)
+// Theme mode chosen in the launcher ('system'|'light'|'dark'); mirrored here for the Settings menu.
+let currentThemeMode = 'system';
 let appStore = null;
 // Last loaded URL per catalog app id, so a still-running app can be re-opened.
 var storeAppUrls = {};
@@ -728,23 +746,10 @@ function buildAppsSubmenu() {
       accelerator: 'CmdOrCtrl+Shift+M',
       click: function () { openManagerFromMenu(updates ? 'updates' : 'installed'); }
     });
+    sub.push({ label: 'Install from Bundle\u2026', click: function () { storeCommand({ cmd: 'install_bundle' }); } });
+    sub.push({ label: 'Install from URL\u2026', click: function () { storeCommand({ cmd: 'install_url' }); } });
     sub.push({ type: 'separator' });
-    sub.push({
-      label: 'Install from bundle\u2026',
-      click: function () {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('store-command', { cmd: 'install_bundle' });
-        }
-      }
-    });
-    sub.push({
-      label: 'Settings\u2026',
-      click: function () {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('store-command', { cmd: 'settings' });
-        }
-      }
-    });
+    sub.push({ label: 'Refresh Catalog', click: function () { storeCommand({ cmd: 'refresh' }); } });
   } else {
     sub.push({
       label: 'Back to Launcher',
@@ -752,6 +757,46 @@ function buildAppsSubmenu() {
       click: function () { leaveToLauncher(); }
     });
   }
+  return sub;
+}
+
+// Send a command to the launcher renderer (opens a focused dialog, sets theme, ...).
+function storeCommand(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('store-command', payload);
+  }
+}
+
+// Top-level Settings menu: one item per store function. Input-style items open a
+// focused dialog in the launcher instead of one crowded sheet.
+function buildSettingsSubmenu() {
+  var sub = [];
+  sub.push({ label: 'Catalog\u2026', click: function () { storeCommand({ cmd: 'catalog' }); } });
+  sub.push({ label: 'App Data Location\u2026', click: function () { storeCommand({ cmd: 'data_root' }); } });
+  sub.push({ label: 'Storage\u2026', click: function () { storeCommand({ cmd: 'storage' }); } });
+  sub.push({ type: 'separator' });
+  sub.push({
+    label: 'Theme',
+    submenu: [
+      { label: 'System', type: 'radio', checked: currentThemeMode === 'system', click: function () { storeCommand({ cmd: 'set_theme', theme: 'system' }); } },
+      { label: 'Light', type: 'radio', checked: currentThemeMode === 'light', click: function () { storeCommand({ cmd: 'set_theme', theme: 'light' }); } },
+      { label: 'Dark', type: 'radio', checked: currentThemeMode === 'dark', click: function () { storeCommand({ cmd: 'set_theme', theme: 'dark' }); } }
+    ]
+  });
+  sub.push({
+    label: 'Save Crash Reports Locally',
+    type: 'checkbox',
+    checked: !!appSettings.crashReporting,
+    click: function (item) {
+      appSettings.crashReporting = !!item.checked;
+      saveSettings();
+      if (appSettings.crashReporting) installCrashHandlers();
+      createMenu();
+    }
+  });
+  sub.push({ type: 'separator' });
+  sub.push({ label: 'Reset Local Data\u2026', click: function () { resetLocalData().catch(function (e) { log('error', 'reset failed:', e && e.message); }); } });
+  sub.push({ label: 'Uninstall ' + shellDisplayName() + '\u2026', click: function () { uninstallShinyApps().catch(function (e) { log('error', 'uninstall failed:', e && e.message); }); } });
   return sub;
 }
 
@@ -817,6 +862,10 @@ function createMenu() {
       label: 'Apps',
       submenu: buildAppsSubmenu()
     },
+    ...(isLauncherVisible ? [{
+      label: 'Settings',
+      submenu: buildSettingsSubmenu()
+    }] : []),
     {{/is_multi_app}}
     {
       label: 'Help',
@@ -933,6 +982,10 @@ function createMenu() {
       label: 'Apps',
       submenu: buildAppsSubmenu()
     },
+    ...(isLauncherVisible ? [{
+      label: 'Settings',
+      submenu: buildSettingsSubmenu()
+    }] : []),
     {{/is_multi_app}}
     {
       label: 'Help',
@@ -1527,6 +1580,15 @@ function createWindow() {
     }
   });
 
+  ipcMain.handle('open-data-root', async () => {
+    try {
+      const root = resolveDataRoot();
+      try { fs.mkdirSync(root, { recursive: true }); } catch (e) {}
+      await shell.openPath(root);
+      return true;
+    } catch (e) { return false; }
+  });
+
   ipcMain.handle('store-disk-free', async () => {
     if (!appStore) return null;
     try { return await appStore.getDiskFree(); }
@@ -1638,6 +1700,15 @@ function createWindow() {
     app.relaunch();
     app.exit(0);
     return { ok: true };
+  });
+
+  ipcMain.on('theme-changed', (_event, mode) => {
+    const m = (mode === 'light' || mode === 'dark') ? mode : 'system';
+    if (m === currentThemeMode) return;
+    currentThemeMode = m;
+    {{#menu_enabled}}
+    createMenu();
+    {{/menu_enabled}}
   });
 
   ipcMain.on('quick-run-order', (_event, data) => {
@@ -2139,6 +2210,29 @@ function createWindow() {
     {{/close_to_tray}}
     {{/tray_enabled}}
     {{^tray_enabled}}
+    if (!isShuttingDown && !app.isQuitting) {
+      const running = runningStoreApps();
+      if (running.length) {
+        event.preventDefault();
+        const { dialog } = require('electron');
+        const choice = dialog.showMessageBoxSync(mainWindow, {
+          type: 'warning',
+          buttons: ['Quit and stop apps', 'Cancel'],
+          defaultId: 1,
+          cancelId: 1,
+          title: 'Quit ' + shellDisplayName(),
+          message: running.length + ' app' + (running.length > 1 ? 's are' : ' is') + ' still running.',
+          detail: 'Quitting will stop: ' + running.join(', ') + '.'
+        });
+        if (choice === 0) {
+          isShuttingDown = true;
+          app.isQuitting = true;
+          var closeNow = function () { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close(); };
+          if (appStore) { appStore.stopAll().catch(function () {}).then(closeNow); } else { closeNow(); }
+        }
+        return;
+      }
+    }
     if (!isShuttingDown && serverRunning) {
       event.preventDefault();
       const { dialog } = require('electron');
@@ -2281,4 +2375,9 @@ app.on('before-quit', () => {
   if (currentBackend) currentBackend.stop();
   // The shared shinylive server is stopped ONLY here, at quit.
   stopSharedShinyliveServer();
+});
+
+// Multi-app: always stop running store apps on quit so no Shiny processes orphan.
+app.on('before-quit', () => {
+  if (appStore) { try { appStore.stopAll(); } catch (e) {} }
 });

@@ -45,5 +45,7 @@ contextBridge.exposeInMainWorld('lifecycle', {
   changeDataRoot: () => ipcRenderer.invoke('change-data-root'),
   resetLocalData: () => ipcRenderer.invoke('reset-local-data'),
   uninstallShell: () => ipcRenderer.invoke('uninstall-shinyapps'),
-  setQuickRunOrder: (data) => ipcRenderer.send('quick-run-order', data)
+  openDataRoot: () => ipcRenderer.invoke('open-data-root'),
+  setQuickRunOrder: (data) => ipcRenderer.send('quick-run-order', data),
+  notifyTheme: (mode) => ipcRenderer.send('theme-changed', mode)
 });
