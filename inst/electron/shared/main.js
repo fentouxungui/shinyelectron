@@ -798,12 +798,12 @@ function buildSettingsSubmenu() {
       { label: 'Dark', type: 'radio', checked: currentThemeMode === 'dark', click: function () { storeCommand({ cmd: 'set_theme', theme: 'dark' }); } }
     ]
   });
+  // A plain item with a leading check mark keeps the whole Settings submenu from
+  // reserving Windows' check-mark gutter (which would indent every item).
   sub.push({
-    label: 'Save Crash Reports Locally',
-    type: 'checkbox',
-    checked: !!appSettings.crashReporting,
-    click: function (item) {
-      appSettings.crashReporting = !!item.checked;
+    label: (appSettings.crashReporting ? '\u2713 ' : '') + 'Save Crash Reports Locally',
+    click: function () {
+      appSettings.crashReporting = !appSettings.crashReporting;
       saveSettings();
       if (appSettings.crashReporting) installCrashHandlers();
       createMenu();
