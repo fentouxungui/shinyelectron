@@ -1125,6 +1125,7 @@
       var f = formatSize;
       addLine('Installed apps', f(u.appsTotal) || '0 MB');
       addLine('Shared packages', f(u.sharedTotal) || '0 MB');
+      if (u.privateTotal) addLine('Private packages', f(u.privateTotal) || '0 MB');
       addLine('Download cache', (f(u.cacheBytes) || '0 MB') + (u.cacheFiles ? '  (' + u.cacheFiles + ' file' + (u.cacheFiles > 1 ? 's' : '') + ')' : ''));
       if (u.staleDirs) addLine('Incomplete', (f(u.staleBytes) || '0 MB') + '  (' + u.staleDirs + ')');
       if (u.diskFree != null) addLine('Free disk', f(u.diskFree) || '');
