@@ -498,7 +498,15 @@ async function runStoreApp(appId) {
   if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(openUrl);   // already running: switch back, do not restart
   } else {
-    try { await appStore.run(appId); } catch (e) { log('error', 'run_app failed:', e && e.message); }
+    try { await appStore.run(appId); }
+    catch (e) {
+      log('error', 'run_app failed:', e && e.message);
+      // A missing install was dropped from the store: tell the launcher so the
+      // stale card is removed instead of failing silently on every click.
+      if (e && e.code === 'NOT_INSTALLED' && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('store-status', { id: appId, state: 'error', error: e.message });
+      }
+    }
   }
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: appId, state: 'done' });
 }
@@ -718,6 +726,7 @@ function installedAppMenuItems() {
   var st;
   try { st = appStore.getState(); } catch (e) { return items; }
   Object.keys(st.apps || {}).forEach(function (id) {
+    if (!appStore.isInstalled(id)) return;
     var m = appMetaFor(id) || {};
     var label = m.name || id;
     if (quickRunFavorites[id]) label = '\u2605 ' + label;
@@ -1541,7 +1550,9 @@ function createWindow() {
       {{/menu_enabled}}
       const plat = platformKey();
       const list = cat.apps.map((a) => {
-        const ins = st.apps[a.id];
+        // Trust the filesystem, not just state.json: an install whose folder is
+        // gone must show as "not installed" instead of an unlaunchable card.
+        const ins = appStore.isInstalled(a.id) ? st.apps[a.id] : null;
         // Only a platform with a published bundle can be installed/updated here.
         const art = a.artifacts && a.artifacts[plat];
         const platformOk = !a.artifacts || !!art;
@@ -1570,7 +1581,7 @@ function createWindow() {
       const catIds = {};
       cat.apps.forEach((a) => { catIds[a.id] = true; });
       Object.keys(st.apps).forEach((id) => {
-        if (catIds[id]) return;
+        if (catIds[id] || !appStore.isInstalled(id)) return;
         const lins = st.apps[id];
         const lm = (lins && lins.meta) || {};
         list.push({

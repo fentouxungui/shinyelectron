@@ -262,11 +262,48 @@ function createAppStore(options) {
   const CATALOG_TTL_MS = 60000;
   const running = new Map();
 
+  // Startup self-heal: forget installs whose files no longer exist.
+  reconcileInstalled();
+
   function loadState() {
     try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); }
     catch { return { schema: 1, apps: {}, shared: {} }; }
   }
   function saveState() { fs.writeFileSync(statePath, JSON.stringify(state, null, 2)); }
+
+  // An install record is only meaningful while its files are still on disk.
+  // A record left behind by a partial uninstall, or by a folder deleted by
+  // hand, would otherwise be listed by the launcher and fail to start.
+  function installedFilesPresent(ins) {
+    if (!ins || !ins.dir) return false;
+    try {
+      if (!fs.existsSync(ins.dir)) return false;
+      // A half-removed install can leave the folder but not its contents.
+      if (fs.existsSync(path.join(ins.dir, 'app'))) return true;
+      return fs.existsSync(path.join(ins.dir, 'manifest.json'));
+    } catch (e) { return false; }
+  }
+  function isInstalled(id) {
+    return installedFilesPresent(state.apps && state.apps[id]);
+  }
+  // Drop records whose files are gone and release their shared-package refs.
+  // Runs at startup so a state.json written by an older/interrupted shell
+  // heals itself instead of showing unlaunchable apps forever.
+  function reconcileInstalled() {
+    let changed = false;
+    for (const id of Object.keys(state.apps || {})) {
+      if (installedFilesPresent(state.apps[id])) continue;
+      log(`warn: ${id} has no installed files; dropping its stale install record`);
+      delete state.apps[id];
+      changed = true;
+    }
+    if (!changed) return false;
+    for (const entry of Object.values(state.shared || {})) {
+      entry.refs = (entry.refs || []).filter((ref) => !!state.apps[ref]);
+    }
+    try { saveState(); } catch (e) { log('warn: could not save state:', e && e.message); }
+    return true;
+  }
 
   async function fetchCatalog({ force = false } = {}) {
     const now = Date.now();
@@ -531,11 +568,18 @@ function createAppStore(options) {
 
   async function uninstall(id) {
     if (!state.apps[id]) return;
-    await stop(id);
-    await fsp.rm(path.join(appsDir, id), { recursive: true, force: true });
-    await fsp.rm(path.join(privateRoot, id), { recursive: true, force: true });
-    await pruneRefs(id, []);
+    try { await stop(id); } catch (e) { log(`warn: could not stop ${id} before uninstall: ${e && e.message}`); }
+    // Forget the install BEFORE touching the filesystem. On Windows a file can
+    // still be locked (R shutting down, virus scanner), and a failed rm must
+    // not leave a ghost entry that the launcher lists but cannot start.
     delete state.apps[id];
+    saveState();
+    for (const dir of [path.join(appsDir, id), path.join(privateRoot, id)]) {
+      try { await fsp.rm(dir, { recursive: true, force: true }); }
+      catch (e) { log(`warn: could not remove ${dir}: ${e && e.message}; it will be left for cleanup`); }
+    }
+    try { await pruneRefs(id, []); }
+    catch (e) { log(`warn: could not release shared packages of ${id}: ${e && e.message}`); }
     saveState();
     log(`uninstalled ${id}`);
   }
@@ -543,6 +587,15 @@ function createAppStore(options) {
   async function run(id) {
     const app = state.apps[id];
     if (!app) throw new Error(`${id} is not installed`);
+    if (!installedFilesPresent(app)) {
+      // Files were removed behind our back: drop the record so the launcher
+      // stops offering an app that cannot start.
+      delete state.apps[id];
+      try { saveState(); } catch (e) { /* best effort */ }
+      const e = new Error(`${id} is not installed: its files are missing (removed it from the launcher)`);
+      e.code = 'NOT_INSTALLED';
+      throw e;
+    }
     if (running.has(id)) return running.get(id);
     const entry = app.meta && app.meta.entry;
     const appPath = entry ? path.join(app.dir, path.dirname(entry)) : path.join(app.dir, 'app');
@@ -687,8 +740,10 @@ function createAppStore(options) {
       }
     } catch (e) {}
     const orphanShared = Object.keys(state.shared || {}).filter(function (n) {
-      const e = state.shared[n];
-      return e && e.refs && e.refs.length === 0;
+      const e = state.shared[n] || {};
+      // Refs to apps that are no longer installed are dead refs, not users.
+      const refs = (e.refs || []).filter(function (r) { return !!state.apps[r]; });
+      return refs.length === 0;
     });
     const total = cacheFiles.length + orphanShared.length;
     report(0, total, total ? 'Cleaning up\u2026' : 'Nothing to clean');
@@ -723,6 +778,16 @@ function createAppStore(options) {
       for (const id of privIds) {
         if (state.apps[id]) continue;
         const sp = path.join(privateRoot, id);
+        try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
+      }
+    } catch (e) {}
+    // App folders with no install record (left behind by a failed uninstall)
+    // are orphans as well; removing them lets the next install start clean.
+    try {
+      const appIds = await fsp.readdir(appsDir);
+      for (const id of appIds) {
+        if (state.apps[id]) continue;
+        const sp = path.join(appsDir, id);
         try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
       }
     } catch (e) {}
@@ -765,6 +830,7 @@ function createAppStore(options) {
     install, installFromFile, uninstall, run, stop, stopAll,
     checkUpdates, update,
     isRunning: (id) => running.has(id),
+    isInstalled,
     forget,
     getState: () => state,
     getCatalog: () => catalog,
