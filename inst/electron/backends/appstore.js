@@ -505,6 +505,12 @@ function createAppStore(options) {
         log(`conflict: ${pkg.name} shared=${shared.version} wanted=${pkg.version} (${appId})`);
         await copyDir(src, path.join(privateRoot, appId, pkg.name));
       }
+      // The app runs with .libPaths = <private>:<shared>, so the bundle's own
+      // copy under rlib/ is never loaded. Remove it after it has been copied
+      // into the shared (or private) library so a shared package is stored
+      // exactly once. copyDir() above has completed, so a failure leaves src
+      // in place.
+      await fsp.rm(src, { recursive: true, force: true }).catch(() => {});
       onProgress({ phase: 'linking', percent: 100, statusText: 'linking ' + pkg.name });
     }
     saveState();
@@ -607,11 +613,15 @@ function createAppStore(options) {
     report(0, total, 'Measuring apps\u2026');
     const apps = [];
     let appsTotal = 0;
+    let privateTotal = 0;
     for (const [id, ins] of appEntries) {
       let bytes = 0;
       try { bytes = await dirSize(path.join(appsDir, id)); } catch (e) {}
+      let priv = 0;
+      try { priv = await dirSize(path.join(privateRoot, id)); } catch (e) {}
       appsTotal += bytes;
-      apps.push({ id: id, version: ins.version, source: ins.source || '', bytes: bytes });
+      privateTotal += priv;
+      apps.push({ id: id, version: ins.version, source: ins.source || '', bytes: bytes, privateBytes: priv });
       done++;
       report(done, total, 'Measuring ' + id + '\u2026');
     }
@@ -652,6 +662,7 @@ function createAppStore(options) {
     return {
       apps: apps.sort((a, b) => b.bytes - a.bytes),
       appsTotal: appsTotal,
+      privateTotal: privateTotal,
       shared: shared.sort((a, b) => b.bytes - a.bytes),
       sharedTotal: sharedTotal,
       cacheBytes: cacheBytes,
@@ -659,7 +670,7 @@ function createAppStore(options) {
       staleBytes: staleBytes,
       staleDirs: staleDirs,
       diskFree: await freeBytes(appsDir),
-      total: appsTotal + sharedTotal + cacheBytes + staleBytes,
+      total: appsTotal + sharedTotal + privateTotal + cacheBytes + staleBytes,
     };
   }
 
@@ -704,6 +715,15 @@ function createAppStore(options) {
             try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
           }
         }
+      }
+    } catch (e) {}
+    // Private libraries for apps that are no longer installed are orphans too.
+    try {
+      const privIds = await fsp.readdir(privateRoot);
+      for (const id of privIds) {
+        if (state.apps[id]) continue;
+        const sp = path.join(privateRoot, id);
+        try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
       }
     } catch (e) {}
     log('cleanup freed ' + Math.round(freed / 1048576) + ' MB');
