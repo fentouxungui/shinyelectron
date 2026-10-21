@@ -74,12 +74,17 @@ async function downloadToFile(url, dest, opts = {}) {
       let idle = setTimeout(() => res.destroy(new Error('download stalled')), idleMs);
       await new Promise((resolve, reject) => {
         const onAbort = () => {
+          clearTimeout(idle);
           const e = cancelError();
           try { res.destroy(e); } catch (x) {}
           try { out.destroy(); } catch (x) {}
           reject(e);
         };
-        const done = (fn) => (v) => { if (signal) signal.removeEventListener('abort', onAbort); fn(v); };
+        const done = (fn) => (v) => {
+          if (signal) signal.removeEventListener('abort', onAbort);
+          clearTimeout(idle);
+          fn(v);
+        };
         if (signal) signal.addEventListener('abort', onAbort, { once: true });
         res.on('data', (c) => {
           received += c.length;
@@ -257,6 +262,14 @@ function createAppStore(options) {
   for (const d of [appsDir, sharedLib, privateRoot, cacheDir]) fs.mkdirSync(d, { recursive: true });
 
   let state = loadState();
+  // Older or hand-edited state files may miss a section; every code path below
+  // assumes both maps exist.
+  if (!state || typeof state !== 'object') state = { schema: 1, apps: {}, shared: {} };
+  if (!state.apps || typeof state.apps !== 'object') state.apps = {};
+  if (!state.shared || typeof state.shared !== 'object') state.shared = {};
+  for (const entry of Object.values(state.shared)) {
+    if (entry && !Array.isArray(entry.refs)) entry.refs = [];
+  }
   let catalog = null;
   let catalogFetchedAt = 0;
   const CATALOG_TTL_MS = 60000;
@@ -338,6 +351,8 @@ function createAppStore(options) {
     const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
     let step = 'download';
     let staging = null;
+    let finalDir = null;
+    let committed = false;
     // Need room for the archive plus its unpacked contents (small margin).
     const free = await freeBytes(cacheDir);
     const need = (art.size || 0) * 3;
@@ -390,10 +405,11 @@ function createAppStore(options) {
 
       const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
       if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
-      const finalDir = path.join(appsDir, id, manifest.version);
+      finalDir = path.join(appsDir, id, manifest.version);
       await fsp.mkdir(path.dirname(finalDir), { recursive: true });
       await fsp.rm(finalDir, { recursive: true, force: true });
       await fsp.rename(staging, finalDir);
+      staging = null;
 
       onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
       await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
@@ -405,6 +421,7 @@ function createAppStore(options) {
         meta: bundleMeta(manifest),
       };
       saveState();
+      committed = true;
       log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
       onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
       // The cached archive has served its purpose; reclaim the disk.
@@ -412,6 +429,16 @@ function createAppStore(options) {
       return { id, version: manifest.version };
     } catch (e) {
       if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
+      if (finalDir && !committed) {
+        // A failed install must not leave a version folder that no record
+        // points at (it would never be reclaimed).
+        await fsp.rm(finalDir, { recursive: true, force: true }).catch(() => {});
+        const rec = state.apps[id];
+        if (rec && rec.dir && path.resolve(rec.dir) === path.resolve(finalDir)) {
+          delete state.apps[id];
+          try { saveState(); } catch (err) { /* best effort */ }
+        }
+      }
       if (e && !e.step) e.step = step;
       throw e;
     }
@@ -426,6 +453,9 @@ function createAppStore(options) {
     const plat = platformKey();
     let step = 'resolve';
     let staging = null;
+    let installId = null;
+    let finalDir = null;
+    let committed = false;
     try {
       if (!zipPath || !fs.existsSync(zipPath) || !fs.statSync(zipPath).isFile()) {
         const e = new Error('bundle file not found'); e.step = 'resolve'; throw e;
@@ -472,8 +502,9 @@ function createAppStore(options) {
       if (!ok) { const e = new Error('cancelled'); e.step = 'confirm'; e.cancelled = true; throw e; }
 
       const id = manifest.id;
+      installId = id;
       const old = state.apps[id] || null;
-      const finalDir = path.join(appsDir, id, manifest.version);
+      finalDir = path.join(appsDir, id, manifest.version);
       await fsp.mkdir(path.dirname(finalDir), { recursive: true });
       await fsp.rm(finalDir, { recursive: true, force: true });
       await fsp.rename(staging, finalDir);
@@ -490,6 +521,7 @@ function createAppStore(options) {
         meta: bundleMeta(manifest),
       };
       saveState();
+      committed = true;
       // Reclaim the previous version's files and shared-library refs.
       await pruneRefs(id, state.apps[id].packages);
       if (old && old.dir && path.resolve(old.dir) !== path.resolve(finalDir)) {
@@ -500,6 +532,15 @@ function createAppStore(options) {
       return { id, version: manifest.version };
     } catch (e) {
       if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
+      if (finalDir && !committed) {
+        // Roll back the half-installed folder and any record that pointed at it.
+        await fsp.rm(finalDir, { recursive: true, force: true }).catch(() => {});
+        const rec = installId ? state.apps[installId] : null;
+        if (rec && rec.dir && path.resolve(rec.dir) === path.resolve(finalDir)) {
+          delete state.apps[installId];
+          try { saveState(); } catch (err) { /* best effort */ }
+        }
+      }
       if (e && !e.step) e.step = step;
       throw e;
     }

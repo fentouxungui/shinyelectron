@@ -162,6 +162,30 @@ function writeRootMarker() {
   } catch (e) { log('warn', 'root marker failed:', e && e.message); }
 }
 
+// state.json records each install's absolute directory, so after the data root
+// moves those paths must be repointed or the migrated apps keep loading from
+// the old folder (and break as soon as it is removed).
+function rewriteStateDirs(stateFile, fromRoot, toRoot) {
+  try {
+    if (!fs.existsSync(stateFile)) return;
+    const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const from = path.resolve(fromRoot);
+    const to = path.resolve(toRoot);
+    let changed = false;
+    for (const id of Object.keys(st.apps || {})) {
+      const dir = st.apps[id] && st.apps[id].dir;
+      if (!dir) continue;
+      const resolved = path.resolve(dir);
+      if (resolved !== from && resolved.indexOf(from + path.sep) !== 0) continue;
+      st.apps[id].dir = path.join(to, path.relative(from, resolved));
+      changed = true;
+    }
+    if (changed) fs.writeFileSync(stateFile, JSON.stringify(st, null, 2));
+  } catch (e) {
+    log('warn', 'could not rewrite install paths in ' + stateFile + ':', e && e.message);
+  }
+}
+
 // Local-only crash capture (opt-in). Uncaught main-process errors are written
 // to <logDir>/crashes/. Nothing is ever uploaded.
 let crashHandlersInstalled = false;
@@ -212,19 +236,46 @@ function findUninstaller() {
   } catch (e) { return null; }
 }
 // Stop backends, close logs, then remove every local store file (thorough).
+// The store data root and a custom log folder can live outside userData (the
+// Windows default data root is %LOCALAPPDATA%\<app>), so they are wiped too.
 async function wipeAllLocalData(onProgress) {
   const report = (typeof onProgress === 'function') ? onProgress : function () {};
   report(0, 0, 'Stopping apps\u2026');
   if (appStore) { try { await appStore.stopAll(); } catch (e) {} }
   closeAllLogs();
   const userData = app.getPath('userData');
-  const targets = ['apps', 'lib', 'private', 'store-cache', 'state.json', 'settings.json', 'logs', 'crashes', 'window-state.json'];
+  const dataRoot = resolveDataRoot();
+  const storeItems = ['apps', 'lib', 'private', 'store-cache', 'state.json', 'root.json'];
+  const targets = [];
+  const addTarget = function (p) {
+    try {
+      const r = path.resolve(p);
+      if (!targets.some(function (t) { return path.resolve(t) === r; })) targets.push(p);
+    } catch (e) { /* skip unusable path */ }
+  };
+  for (const t of ['apps', 'lib', 'private', 'store-cache', 'state.json', 'root.json', 'settings.json', 'logs', 'crashes', 'window-state.json']) {
+    addTarget(path.join(userData, t));
+  }
+  if (path.resolve(dataRoot) !== path.resolve(userData)) {
+    for (const t of storeItems) addTarget(path.join(dataRoot, t));
+  }
+  try {
+    const logs = path.resolve(logDir);
+    const ud = path.resolve(userData);
+    if (logs !== ud && logs.indexOf(ud + path.sep) !== 0) addTarget(logDir);
+  } catch (e) { /* logging is best-effort */ }
   let done = 0;
   for (const t of targets) {
-    try { fs.rmSync(path.join(userData, t), { recursive: true, force: true }); } catch (e) {}
+    try { fs.rmSync(t, { recursive: true, force: true }); } catch (e) {}
     done++;
     report(done, targets.length, 'Removing data\u2026');
   }
+  // Do not leave an empty app-data folder behind when everything in it was ours.
+  try {
+    if (path.resolve(dataRoot) !== path.resolve(userData)) {
+      fs.rmdirSync(dataRoot);
+    }
+  } catch (e) { /* not empty or already gone */ }
 }
 function runningStoreApps() {
   if (!appStore) return [];
@@ -494,9 +545,21 @@ async function runStoreApp(appId) {
   {{#menu_enabled}}
   createMenu();
   {{/menu_enabled}}
-  var openUrl = appStore.isRunning(appId) ? storeAppUrls[appId] : null;
+  var wasRunning = appStore.isRunning(appId);
+  var openUrl = wasRunning ? storeAppUrls[appId] : null;
   if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(openUrl);   // already running: switch back, do not restart
+  } else if (wasRunning) {
+    // Running but its address was lost: recover it from the live backend
+    // instead of leaving the launcher on screen.
+    try {
+      var live = await appStore.run(appId);
+      var liveUrl = (live && live.url) || storeAppUrls[appId];
+      if (liveUrl) storeAppUrls[appId] = liveUrl;
+      if (liveUrl && mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(liveUrl);
+    } catch (e) {
+      log('error', 'run_app failed:', e && e.message);
+    }
   } else {
     try { await appStore.run(appId); }
     catch (e) {
@@ -1511,12 +1574,25 @@ function createWindow() {
         storeAppUrls[opts.appId] = 'http://localhost:' + actualPort;
         mainWindow.loadURL('http://localhost:' + actualPort);
         resolve({
+          // The launcher can re-open a still-running app even if its cached
+          // address was lost.
+          url: 'http://localhost:' + actualPort,
           stop: function () {
             return new Promise(function (done) {
-              var onExit = function (d) { if (d && d.phase === 'app_exit') { b.removeListener('status', onExit); done(); } };
+              var settled = false;
+              var timer = null;
+              var finish = function () {
+                if (settled) return;
+                settled = true;
+                if (timer) { clearTimeout(timer); timer = null; }
+                b.removeListener('status', onExit);
+                done();
+              };
+              var onExit = function (d) { if (d && d.phase === 'app_exit') finish(); };
               b.on('status', onExit);
+              // Assigned before stop() so a synchronous app_exit still clears it.
+              timer = setTimeout(finish, 120000);
               b.stop();
-              setTimeout(done, 120000);
             });
           }
         });
@@ -1607,7 +1683,7 @@ function createWindow() {
       const { clipboard } = require('electron');
       const os = require('os');
       const id = appId || lastSelectedAppId || null;
-      const ins = (id && appStore) ? appStore.getState().apps[id] : null;
+      const ins = (id && appStore && appStore.isInstalled(id)) ? appStore.getState().apps[id] : null;
       const ce = (id && appStore) ? appStore.catalogEntry(id) : null;
       const L = [];
       L.push('ShinyApps diagnostics');
@@ -1728,7 +1804,14 @@ function createWindow() {
     });
     if (pick.canceled || !pick.filePaths.length) return { ok: false, canceled: true };
     const target = pick.filePaths[0];
-    if (path.resolve(target) === path.resolve(cur)) return { ok: false, message: 'That is already the current location.' };
+    const curAbs = path.resolve(cur);
+    const targetAbs = path.resolve(target);
+    if (targetAbs === curAbs) return { ok: false, message: 'That is already the current location.' };
+    // Nesting one root inside the other would make the copy/cleanup below
+    // delete the data it just wrote.
+    if (targetAbs.indexOf(curAbs + path.sep) === 0 || curAbs.indexOf(targetAbs + path.sep) === 0) {
+      return { ok: false, message: 'Choose a folder outside the current app data location.' };
+    }
     let existing = false;
     try {
       existing = fs.existsSync(path.join(target, 'state.json')) ||
@@ -1782,6 +1865,14 @@ function createWindow() {
           moved++;
           sendBusy({ state: 'installing', statusText: 'Moved ' + it, percent: Math.round((moved / totalItems) * 100) });
         }
+        // The copied state.json still holds the old absolute install paths.
+        rewriteStateDirs(path.join(target, 'state.json'), cur, target);
+        // "Move" must not leave the old copy behind (it would double the disk
+        // use and could be picked up again if the location is switched back).
+        for (const it of present) {
+          try { await fsp.rm(path.join(cur, it), { recursive: true, force: true }); }
+          catch (e) { log('warn', 'could not remove old ' + it + ':', e && e.message); }
+        }
       }
       appSettings.dataRoot = target;
       saveSettings();
@@ -1816,7 +1907,7 @@ function createWindow() {
 
   ipcMain.handle('open-app-folder', async (_event, appId) => {
     try {
-      if (!appStore || !appId) return false;
+      if (!appStore || !appId || !appStore.isInstalled(appId)) return false;
       const ins = appStore.getState().apps[appId];
       if (!ins || !ins.dir) return false;
       const entry = (ins.meta && ins.meta.entry) || 'app/app.R';

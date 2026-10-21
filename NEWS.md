@@ -54,7 +54,7 @@
 ## New features
 
 * New `lifecycle.startup_timeout` sets how long, in milliseconds, an app waits
-  for its R, Python, or container server to start (default 180000, three
+  for its R, Python, or container server to start (default 900000, fifteen
   minutes). R and Python apps used to give up after 60 seconds and container
   apps after 120. This timeout and `lifecycle.shutdown_timeout` must be whole
   numbers from 1000 to 2147483647; any other value warns and falls back to the
