@@ -110,6 +110,8 @@ async function downloadToFile(url, dest, opts = {}) {
       onProgress(0, 0, expectedSize);
     }
   }
+  // Every attempt failed: do not leave a partial archive in the cache.
+  await fsp.rm(part, { force: true }).catch(() => {});
   throw lastErr || new Error('download failed');
 }
 
@@ -664,6 +666,10 @@ function createAppStore(options) {
       // Count a newer version only when this platform has a bundle for it;
       // otherwise there is nothing the user could install here.
       if (e.artifacts && !e.artifacts[plat]) continue;
+      // Mirror the launcher's check: an update this shell cannot run (needs a
+      // newer R or a newer shell) is not offered, so it must not be counted.
+      if (shellRVersion && e.r_version && cmpVersion(shellRVersion, e.r_version) < 0) continue;
+      if (shellVersion && e.min_shell_version && cmpVersion(shellVersion, e.min_shell_version) < 0) continue;
       if (cmpVersion(e.version, app.version) > 0) out.push({ id, from: app.version, to: e.version });
     }
     return out;
@@ -672,6 +678,15 @@ function createAppStore(options) {
     const e = catalogEntry(id);
     const app = state.apps[id];
     if (!e || !app || cmpVersion(e.version, app.version) <= 0) return;
+    // Never install a bundle this shell cannot run.
+    if (shellRVersion && e.r_version && cmpVersion(shellRVersion, e.r_version) < 0) {
+      log(`update ${id} skipped: needs R ${e.r_version}, shell ships ${shellRVersion}`);
+      return;
+    }
+    if (shellVersion && e.min_shell_version && cmpVersion(shellVersion, e.min_shell_version) < 0) {
+      log(`update ${id} skipped: needs shell ${e.min_shell_version}, this is ${shellVersion}`);
+      return;
+    }
     await stop(id);
     const oldDir = app.dir;
     await install(id, onProgress, signal);

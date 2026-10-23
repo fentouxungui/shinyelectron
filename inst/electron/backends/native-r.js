@@ -462,12 +462,10 @@ class NativeRBackend extends EventEmitter {
       const checker2 = require('./dependency-checker');
       const userLibPath = checker2.resolveLibPath(config?.app_slug || 'default', config, checker2.readPreferences(config?.app_slug || 'default'));
 
-      // Build .libPaths() with bundled lib (if exists) and user lib (if set)
-      // Escape paths to prevent R code injection via crafted directory names
-      // const libPaths = [];
-      // if (fs.existsSync(bundledLib)) libPaths.push(bundledLib.replace(/\\/g, '/').replace(/"/g, '\\"'));
-      // if (userLibPath) libPaths.push(userLibPath.replace(/\\/g, '/').replace(/"/g, '\\"'));
-      const esc = (p) => p.replace(/\\/g, '/').replace(/"/g, '\\"');
+      // Escape paths to prevent R code injection via crafted directory names.
+      // Newlines are stripped like the app path below: a line break would end
+      // the R statement and let the rest run as code.
+      const esc = (p) => String(p).replace(/[\r\n]/g, '').replace(/\\/g, '/').replace(/"/g, '\\"');
       const libPaths = [];
       // App-store extras (app private lib : shared lib), highest priority.
       if (config && Array.isArray(config.extra_lib_paths)) {
@@ -476,7 +474,7 @@ class NativeRBackend extends EventEmitter {
       if (fs.existsSync(bundledLib)) libPaths.push(esc(bundledLib));
       if (userLibPath) libPaths.push(esc(userLibPath));
       
-      const safeAppPath = appPath.replace(/\\/g, '/').replace(/[\r\n]/g, '').replace(/'/g, "\\'").replace(/"/g, '\\"');
+      const safeAppPath = String(appPath).replace(/\\/g, '/').replace(/[\r\n]/g, '').replace(/'/g, "\\'").replace(/"/g, '\\"');
 
       let rCode;
       if (libPaths.length > 0) {

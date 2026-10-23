@@ -15,10 +15,15 @@ function run() {
   try {
     const size = fs.fstatSync(fd).size;
     const readAt = (pos, len) => {
-      const b = Buffer.allocUnsafe(len);
+      // Sizes and offsets come from the archive: never trust them for an
+      // allocation, and never read past the end of the file.
+      if (!Number.isFinite(pos) || pos < 0) throw new Error('not a zip (bad offset)');
+      const start = Math.min(Math.floor(pos), size);
+      const want = Math.max(0, Math.min(Math.floor(len) || 0, size - start));
+      const b = Buffer.allocUnsafe(want);
       let got = 0;
-      while (got < len) {
-        const n = fs.readSync(fd, b, got, len - got, pos + got);
+      while (got < want) {
+        const n = fs.readSync(fd, b, got, want - got, start + got);
         if (n <= 0) break;
         got += n;
       }
@@ -38,15 +43,18 @@ function run() {
       const locPos = (size - tailLen) + eocd - 20;
       if (locPos >= 0) {
         const loc = readAt(locPos, 20);
-        if (loc.readUInt32LE(0) === 0x07064b50) {
+        if (loc.length === 20 && loc.readUInt32LE(0) === 0x07064b50) {
           const z64 = readAt(Number(loc.readBigUInt64LE(8)), 56);
-          if (z64.readUInt32LE(0) === 0x06064b50) {
+          if (z64.length === 56 && z64.readUInt32LE(0) === 0x06064b50) {
             entries = Number(z64.readBigUInt64LE(32));
             cdSize = Number(z64.readBigUInt64LE(40));
             cdOffset = Number(z64.readBigUInt64LE(48));
           }
         }
       }
+    }
+    if (cdOffset < 0 || cdSize < 0 || cdOffset + cdSize > size) {
+      throw new Error('not a zip (central directory out of bounds)');
     }
     const cd = readAt(cdOffset, cdSize);
     const root = path.resolve(destDir);
@@ -117,10 +125,13 @@ function run() {
       const target = path.resolve(root, it.name);
       if (target !== root && !target.startsWith(root + path.sep)) throw new Error('zip-slip entry rejected: ' + it.name);
       if (it.isDir) { fs.mkdirSync(target, { recursive: true }); processed++; continue; }
+      if (it.lho < 0 || it.lho + 30 > size) throw new Error('bad local header offset for ' + it.name);
       const lh = readAt(it.lho, 30);
-      if (lh.readUInt32LE(0) !== 0x04034b50) throw new Error('bad local file header');
+      if (lh.length < 30 || lh.readUInt32LE(0) !== 0x04034b50) throw new Error('bad local file header');
       const dataPos = it.lho + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
+      if (dataPos < 0 || dataPos + it.compSize > size) throw new Error('truncated entry ' + it.name);
       const comp = readAt(dataPos, it.compSize);
+      if (comp.length !== it.compSize) throw new Error('truncated entry ' + it.name);
       const data = it.method === 0 ? comp : it.method === 8 ? zlib.inflateRawSync(comp)
         : (() => { throw new Error('unsupported zip compression method ' + it.method); })();
       fs.mkdirSync(path.dirname(target), { recursive: true });

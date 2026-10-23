@@ -1420,6 +1420,12 @@ async function checkAppUpdateInteractive() {
     return show('info', 'No update information',
       name + ' was not installed from the catalog, so it has no update channel.');
   }
+  if ((SHELL_R_VERSION && entry.r_version && cmpVersion(SHELL_R_VERSION, entry.r_version) < 0) ||
+      (entry.min_shell_version && cmpVersion('{{{app_version_js}}}', entry.min_shell_version) < 0)) {
+    return show('info', 'Update not available',
+      'Version ' + entry.version + ' of ' + name + ' needs a newer build of this app shell' +
+      (entry.r_version ? (' (R ' + entry.r_version + ')') : '') + '. Install a newer shell to update it.');
+  }
   if (cmpVersion(entry.version, installed) <= 0) {
     return show('info', 'You are up to date', name + ' ' + installed + ' is the latest version.');
   }
@@ -1589,8 +1595,20 @@ function createWindow() {
       // Clear the store running flag whenever the backend actually exits
       // (e.g. after Back to Launcher stops it), so the launcher shows Run again.
       currentBackend.on('status', function (d) {
-        if (d && d.phase === 'app_exit') { appLogWrite('[app_exit]'); closeAppLog(); }
-        if (d && d.phase === 'app_exit' && appStore) appStore.stop(opts.appId).catch(function () {});
+        if (!d) return;
+        if (d.phase === 'app_exit') { appLogWrite('[app_exit]'); closeAppLog(); }
+        if (d.phase === 'app_exit' && appStore) appStore.stop(opts.appId).catch(function () {});
+        if (d.phase === 'server_crashed') {
+          // The R process died. Forget the app and its address, otherwise the
+          // launcher keeps showing it as running and "Open" loads a dead URL.
+          appLogWrite('[server_crashed]');
+          closeAppLog();
+          delete storeAppUrls[opts.appId];
+          if (appStore) appStore.forget(opts.appId);
+          lastSelectedAppId = null;
+          currentAppMeta = null;
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+        }
       });
       lastSelectedAppId = opts.appId;
       mainWindow.loadFile('lifecycle.html');
