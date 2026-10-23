@@ -323,6 +323,13 @@
               document.getElementById('progress-fill').style.width = data.percent + '%';
               document.getElementById('progress-sub').textContent =
                 data.percent < 100 ? data.percent + '%' : '';
+            } else {
+              // A phase without a percentage (e.g. starting_server after a
+              // download) must not keep the previous phase's filled bar.
+              var bar2 = document.getElementById('progress-bar');
+              bar2.classList.add('progress-bar-indeterminate');
+              document.getElementById('progress-fill').style.width = '';
+              document.getElementById('progress-sub').textContent = '';
             }
             break;
 

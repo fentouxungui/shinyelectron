@@ -1424,8 +1424,16 @@
 
     // Progress ticks update only the affected card, so the grid no longer
     // rebuilds many times a second (which could swallow clicks on other cards).
+    function appIdSelector(id) {
+      // Catalog ids are not validated like bundle manifests are; escape them so
+      // a stray quote or backslash cannot make querySelector throw.
+      var v = String(id);
+      if (window.CSS && typeof window.CSS.escape === 'function') v = window.CSS.escape(v);
+      else v = v.replace(/["\\\]]/g, '\\$&');
+      return '[data-app-id="' + v + '"]';
+    }
     function updateCardProgress(app) {
-      var el = document.querySelector('[data-app-id="' + app.id + '"]');
+      var el = document.querySelector(appIdSelector(app.id));
       if (!el) return;
       var bar = el.querySelector('.progress > i');
       if (bar) bar.style.width = (app.percent || 0) + '%';
@@ -1446,6 +1454,7 @@
           bundlePercent = 0;
           render();
           if (ev.state === 'error') showToast(ev.message || ('Bundle install failed' + (ev.error ? ': ' + ev.error : '')), 'error');
+          else if (ev.state === 'cancelled') showToast('Bundle install cancelled');
           else showToast(ev.message || 'Bundle installed', 'success');
           refresh();
           return;

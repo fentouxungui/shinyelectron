@@ -21,6 +21,14 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
     const proto = url.startsWith('https') ? https : http;
     const file = fs.createWriteStream(dest);
 
+    // Settle once: a broken response, a write error and the request error can
+    // all fire for the same attempt, and cleanup() deletes `dest`.
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
     const cleanup = () => {
       file.close();
       if (fs.existsSync(dest)) {
@@ -31,7 +39,7 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
     // Surface disk-full / write errors instead of hanging.
     file.on('error', (err) => {
       cleanup();
-      reject(err);
+      finish(reject, err);
     });
 
     const req = proto.get(url, (response) => {
@@ -40,17 +48,17 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
         response.resume();
         cleanup();
         if (redirectsLeft <= 0) {
-          reject(new Error('Too many redirects while downloading runtime'));
+          finish(reject, new Error('Too many redirects while downloading runtime'));
           return;
         }
         return downloadFile(response.headers.location, dest, onProgress, redirectsLeft - 1)
-          .then(resolve).catch(reject);
+          .then((v) => finish(resolve, v)).catch((e) => finish(reject, e));
       }
 
       if (response.statusCode !== 200) {
         response.resume();
         cleanup();
-        reject(new Error(`Download failed with status ${response.statusCode}`));
+        finish(reject, new Error(`Download failed with status ${response.statusCode}`));
         return;
       }
 
@@ -64,9 +72,16 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
         }
       });
 
+      // A connection reset mid-download otherwise emits an unhandled 'error'
+      // on the response stream, which crashes the whole shell.
+      response.on('error', (err) => {
+        cleanup();
+        finish(reject, err);
+      });
+
       response.pipe(file);
       file.on('finish', () => {
-        file.close(() => resolve());
+        file.close(() => finish(resolve));
       });
     });
 
@@ -78,7 +93,7 @@ function downloadFile(url, dest, onProgress, redirectsLeft = 5) {
 
     req.on('error', (err) => {
       cleanup();
-      reject(err);
+      finish(reject, err);
     });
   });
 }

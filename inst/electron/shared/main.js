@@ -2357,7 +2357,8 @@ function createWindow() {
         sendBundle({ state: 'done', op: 'install_bundle' });
       } catch (e) {
         if (!(e && e.cancelled)) sendBundle({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
-        else sendBundle({ state: 'done' });
+        // Say so explicitly: 'done' made the launcher report "Bundle installed".
+        else sendBundle({ state: 'cancelled' });
       } finally {
         storeBusy = false;
         // A bundle install also owns storeBusy: run anything that queued behind it.

@@ -70,6 +70,16 @@ generate_template_variables <- function(app_name, app_slug, app_type,
   # The R runtime the shell bundles (dependencies.r.version). main.js compares
   # it against a catalog app's r_version to flag an incompatible install.
   r_version <- config$dependencies$r$version %||% ""
+  # A bundled build embeds R even when the config leaves the version unset (or
+  # says "latest"), so report the version actually shipped; otherwise the
+  # catalog compatibility gate silently compares against an empty string.
+  if (identical(runtime_strategy, "bundled") &&
+      (!nzchar(r_version) || identical(r_version, "latest"))) {
+    r_version <- tryCatch(
+      as.character(resolve_runtime_version("r", config)),
+      error = function(e) ""
+    )
+  }
   tray_tooltip <- config$tray$tooltip %||% app_name
   # copy_brand_assets() copies the app icon to assets/icon.<ext>, keeping its
   # extension (icon.ico, icon.icns or icon.png).

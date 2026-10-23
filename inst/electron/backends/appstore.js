@@ -349,6 +349,15 @@ function createAppStore(options) {
     const plat = platformKey();
     const art = entry.artifacts && entry.artifacts[plat];
     if (!art) { const e = new Error(`no bundle for ${plat} of ${id}`); e.step = 'resolve'; throw e; }
+    // Same gate as installFromFile: never install a bundle this shell cannot run.
+    if (shellRVersion && entry.r_version && cmpVersion(shellRVersion, entry.r_version) < 0) {
+      const e = new Error(`app needs R ${entry.r_version}; this build ships R ${shellRVersion}`);
+      e.step = 'resolve'; e.code = 'INCOMPATIBLE'; throw e;
+    }
+    if (shellVersion && entry.min_shell_version && cmpVersion(shellVersion, entry.min_shell_version) < 0) {
+      const e = new Error(`app needs a newer ShinyApps (${entry.min_shell_version}); you have ${shellVersion}`);
+      e.step = 'resolve'; e.code = 'INCOMPATIBLE'; throw e;
+    }
 
     const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
     let step = 'download';
