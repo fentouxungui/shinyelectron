@@ -529,6 +529,24 @@ function appMetaFor(id) {
   return buildAppMeta(ce, ins && ins.version, man);
 }
 
+// Shiny apps commonly ship no <title>, so after navigation the window keeps
+// whatever title the previous page (lifecycle/launcher) set, i.e. the shell
+// name. Title it with the running app's name instead; a title the app sets
+// itself still wins.
+function setWindowTitleForApp(appId) {
+  if (!mainWindow || mainWindow.isDestroyed() || !appId) return;
+  var meta = appMetaFor(appId);
+  var label = ((meta && meta.name) || appId || '').trim();
+  if (!label) return;
+  var current = '';
+  try { current = String(mainWindow.webContents.getTitle() || '').trim(); } catch (e) {}
+  var shellName = '{{{app_name_js}}}';
+  // Keep a real title the app supplied; replace the shell's name or a bare URL.
+  if (!current || current === shellName || /^https?:\/\//i.test(current)) {
+    mainWindow.setTitle(label);
+  }
+}
+
 // Launch an installed store app and reflect it in Help/About and the menu.
 // Shared by the launcher's Run button path and the Apps > Quick Run menu.
 async function runStoreApp(appId) {
@@ -549,6 +567,7 @@ async function runStoreApp(appId) {
   var openUrl = wasRunning ? storeAppUrls[appId] : null;
   if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.loadURL(openUrl);   // already running: switch back, do not restart
+    setWindowTitleForApp(appId);
   } else if (wasRunning) {
     // Running but its address was lost: recover it from the live backend
     // instead of leaving the launcher on screen.
@@ -556,7 +575,10 @@ async function runStoreApp(appId) {
       var live = await appStore.run(appId);
       var liveUrl = (live && live.url) || storeAppUrls[appId];
       if (liveUrl) storeAppUrls[appId] = liveUrl;
-      if (liveUrl && mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(liveUrl);
+      if (liveUrl && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(liveUrl);
+        setWindowTitleForApp(appId);
+      }
     } catch (e) {
       log('error', 'run_app failed:', e && e.message);
     }
@@ -1531,6 +1553,19 @@ function createWindow() {
   });
   {{/menu_enabled}}
 
+  // Keep the window titled after the running app. Shiny apps often set no
+  // <title>, so the title would otherwise stay at the shell name from the
+  // lifecycle/launcher page. A title the app itself supplies is kept.
+  mainWindow.on('page-title-updated', (event, title) => {
+    if (!currentAppMeta) return;
+    const own = String(currentAppMeta.name || '').trim() || String(lastSelectedAppId || '');
+    if (!own) return;
+    const next = String(title || '').trim();
+    if (next && next !== '{{{app_name_js}}}') return;
+    event.preventDefault();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitle(own);
+  });
+
   // --- App store wiring (multi-app) -------------------------------------
   function storeStartBackend(opts) {
     return new Promise(function (resolve, reject) {
@@ -1572,7 +1607,9 @@ function createWindow() {
       }).then(function (result) {
         actualPort = result.port;
         storeAppUrls[opts.appId] = 'http://localhost:' + actualPort;
-        mainWindow.loadURL('http://localhost:' + actualPort);
+        mainWindow.loadURL('http://localhost:' + actualPort).then(function () {
+          setWindowTitleForApp(opts.appId);
+        }).catch(function () { /* navigation errors are reported elsewhere */ });
         resolve({
           // The launcher can re-open a still-running app even if its cached
           // address was lost.
@@ -2135,7 +2172,9 @@ function createWindow() {
     }).then(function(result) {
       actualPort = result.port;
       storeAppUrls[selectedApp.id] = 'http://localhost:' + actualPort;
-      mainWindow.loadURL('http://localhost:' + actualPort);
+      mainWindow.loadURL('http://localhost:' + actualPort).then(function () {
+        setWindowTitleForApp(selectedApp.id);
+      }).catch(function () { /* navigation errors are reported elsewhere */ });
     }).catch(function(err) {
       if (isSupersededStart(err)) return;
       log('error', 'Backend start failed:', err.message);
@@ -2331,6 +2370,7 @@ function createWindow() {
       var openUrl = storeAppUrls[action.appId];
       if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadURL(openUrl);
+        setWindowTitleForApp(action.appId);
       } else {
         await runStoreApp(action.appId);
       }
