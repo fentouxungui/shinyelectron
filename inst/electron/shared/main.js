@@ -564,33 +564,44 @@ function appUsageFromTable(table) {
   return { cpu, mem };
 }
 
-function sendMetrics(payload) {
+function fmtGB(bytes) { return (Number(bytes || 0) / 1073741824).toFixed(1) + ' GB'; }
+function fmtPct(value) { return value < 10 ? value.toFixed(1) : String(Math.round(value)); }
+
+// Compose the title-bar text: "<App> — CPU 23% · RAM 5.1/15.9 GB (app 4.1% · 1.2 GB)".
+// The app part is dropped when the process tree cannot be read, so a narrow
+// title bar truncates only the least important part.
+function setMetricsTitle(sys, app) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const wc = mainWindow.webContents;
-  if (!wc || wc.isDestroyed()) return;
-  try { wc.send('app-metrics', payload); } catch (e) { /* page closed mid-send */ }
+  var meta = currentAppMeta || (lastSelectedAppId ? appMetaFor(lastSelectedAppId) : null);
+  var base = (meta && meta.name) || lastSelectedAppId || '{{{app_name_js}}}';
+  var text = base + ' \u2014 CPU ' + Math.round(sys.cpu) + '% \u00b7 RAM ' +
+    (sys.memUsed / 1073741824).toFixed(1) + '/' + (sys.memTotal / 1073741824).toFixed(1) + ' GB';
+  if (app) text += '  (app ' + fmtPct(app.cpu) + '% \u00b7 ' + fmtGB(app.mem) + ')';
+  mainWindow.setTitle(text);
 }
 
 function metricsTick() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const enabled = metricsEnabled();
-  // Only an app page shows the overlay, so do not query the OS while the
-  // launcher/lifecycle page is on screen.
+  // Only an app page shows metrics; while the launcher/lifecycle page is on
+  // screen its own <title> stays in charge.
   let onAppPage = false;
   try { onAppPage = /^https?:/i.test(mainWindow.webContents.getURL() || ''); } catch (e) { /* mid-navigation */ }
-  const payload = {
-    enabled,
-    system: {
-      cpu: systemCpuPercent(),
-      memUsed: os.totalmem() - os.freemem(),
-      memTotal: os.totalmem(),
-    },
-    app: null,
+  // Called every tick even when unused so the CPU delta keeps a steady window.
+  const sys = {
+    cpu: systemCpuPercent(),
+    memUsed: os.totalmem() - os.freemem(),
+    memTotal: os.totalmem(),
   };
-  if (!enabled || !onAppPage || !backendRootPids().length) {
+  if (!enabled || !onAppPage) {
     procTimeByPid = new Map();
     lastProcSampleAt = 0;
-    sendMetrics(payload);
+    return;
+  }
+  if (!backendRootPids().length) {
+    procTimeByPid = new Map();
+    lastProcSampleAt = 0;
+    setMetricsTitle(sys, null);
     return;
   }
   // A slow OS query (large process table, antivirus) must not stack up ticks.
@@ -600,7 +611,7 @@ function metricsTick() {
     metricsBusy = false;
     if (!table || !table.length) {
       // Three empty tables in a row mean the OS query does not work here;
-      // stop spawning it and fall back to the system totals line.
+      // stop spawning it and show the system figures only.
       if (++metricsReadFailures >= 3 && processTableReader !== 'off') {
         processTableReader = 'off';
         log('warn', 'process metrics unavailable; showing system totals only');
@@ -609,15 +620,14 @@ function metricsTick() {
     } else {
       metricsReadFailures = 0;
     }
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    payload.app = table.length ? appUsageFromTable(table) : null;
-    sendMetrics(payload);
+    const app = table.length ? appUsageFromTable(table) : null;
+    setMetricsTitle(sys, app);
   });
 }
 
 function startMetrics() {
   if (metricsTimer) return;
-  log('info', '[metrics] CPU/RAM sampler started (overlay ' + (metricsEnabled() ? 'on' : 'off') + ', reader ' + (process.platform === 'win32' ? 'wmic/CIM' : 'ps') + ')');
+  log('info', '[metrics] CPU/RAM title sampler started (title bar ' + (metricsEnabled() ? 'on' : 'off') + ', reader ' + (process.platform === 'win32' ? 'wmic/CIM' : 'ps') + ')');
   metricsTick();
   metricsTimer = setInterval(metricsTick, 2000);
   if (metricsTimer.unref) metricsTimer.unref();
@@ -771,12 +781,14 @@ function appMetaFor(id) {
 // Shiny apps commonly ship no <title>, so after navigation the window keeps
 // whatever title the previous page (lifecycle/launcher) set, i.e. the shell
 // name. Title it with the running app's name instead; a title the app sets
-// itself still wins.
-function setWindowTitleForApp(appId) {
+// itself still wins. `force` sets the name even when the window currently
+// carries a title of our own (the CPU/RAM suffix) to drop it.
+function setWindowTitleForApp(appId, force) {
   if (!mainWindow || mainWindow.isDestroyed() || !appId) return;
   var meta = appMetaFor(appId);
   var label = ((meta && meta.name) || appId || '').trim();
   if (!label) return;
+  if (force) { mainWindow.setTitle(label); return; }
   var current = '';
   try { current = String(mainWindow.webContents.getTitle() || '').trim(); } catch (e) {}
   var shellName = '{{{app_name_js}}}';
@@ -1121,7 +1133,12 @@ function toggleMetricsOverlay() {
   appSettings.metricsOverlay = !metricsEnabled();
   saveSettings();
   createMenu();
-  if (mainWindow && !mainWindow.isDestroyed()) metricsTick();
+  if (metricsEnabled()) {
+    metricsTick();
+  } else if (mainWindow && !mainWindow.isDestroyed()) {
+    // Drop the suffix immediately; the app name stays.
+    setWindowTitleForApp(lastSelectedAppId || '', true);
+  }
 }
 
 function buildSettingsSubmenu() {
@@ -1141,7 +1158,7 @@ function buildSettingsSubmenu() {
   // A plain item with a leading check mark keeps the whole Settings submenu from
   // reserving Windows' check-mark gutter (which would indent every item).
   sub.push({
-    label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM Overlay',
+    label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM in Title Bar',
     click: toggleMetricsOverlay
   });
   sub.push({
@@ -1363,7 +1380,7 @@ function createMenu() {
         { role: 'togglefullscreen' },
         { type: 'separator' },
         // Available while an app runs, when the Settings menu is hidden.
-        { label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM Overlay', click: toggleMetricsOverlay }
+        { label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
       ]
     },
     {

@@ -61,11 +61,10 @@
   default. Before, a `shutdown_timeout` such as `"10s"` built an app that could
   not launch.
 
-* A running app can show a CPU/RAM overlay in the bottom-right corner: the
-  system total plus the app's own process tree (the R/Python child and its
-  children). Toggle it from Settings > Show CPU/RAM Overlay; it is on by
-  default. Sampling runs only while an app page is open and adds no
-  dependencies.
+* A running app can show CPU/RAM in the window title bar: the system total plus
+  the app's own process tree (the R/Python child and its children). Toggle it
+  from Settings or View > Show CPU/RAM in Title Bar; it is on by default.
+  Sampling runs only while an app page is open and adds no dependencies.
 
 * `installer.allow_to_change_installation_directory: true` adds a page to the
   Windows setup wizard where users choose the installation folder. It requires
