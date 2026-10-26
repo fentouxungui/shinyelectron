@@ -617,6 +617,7 @@ function metricsTick() {
 
 function startMetrics() {
   if (metricsTimer) return;
+  log('info', '[metrics] CPU/RAM sampler started (overlay ' + (metricsEnabled() ? 'on' : 'off') + ', reader ' + (process.platform === 'win32' ? 'wmic/CIM' : 'ps') + ')');
   metricsTick();
   metricsTimer = setInterval(metricsTick, 2000);
   if (metricsTimer.unref) metricsTimer.unref();
@@ -2830,6 +2831,10 @@ app.whenReady().then(() => {
 
   createWindow();
 
+  // Start the CPU/RAM sampler after the window exists; it samples system-wide
+  // figures always and the app process tree only while an app is running.
+  startMetrics();
+
   {{#tray_enabled}}
   createTray();
   {{/tray_enabled}}
@@ -2846,11 +2851,8 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-  createWindow();
-
-  // Start the CPU/RAM sampler after the window exists; it samples system-wide
-  // figures always and the app process tree only while an app is running.
-  startMetrics();
+      createWindow();
+      startMetrics();
     }
   });
 });

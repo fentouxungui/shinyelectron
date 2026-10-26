@@ -54,12 +54,15 @@ contextBridge.exposeInMainWorld('lifecycle', {
 // The main process samples system totals and the running app's process tree
 // and pushes them here. Only pages served by the app backend (http/https) get
 // the overlay; the shell's own file:// pages (launcher, lifecycle) never do.
+// The protocol is checked when a sample arrives (not at preload time), which
+// is also after navigation, so it reflects the page that is on screen.
 (function installMetricsOverlay() {
-  let isAppPage = false;
-  try { isAppPage = location.protocol === 'http:' || location.protocol === 'https:'; } catch (e) { /* about:blank */ }
-  if (!isAppPage) return;
-
   let overlay = null;
+  let announced = false;
+
+  const isAppPage = () => {
+    try { return location.protocol === 'http:' || location.protocol === 'https:'; } catch (e) { return false; }
+  };
   const fmtGB = (bytes) => (Number(bytes || 0) / 1073741824).toFixed(1) + ' GB';
 
   function ensureOverlay() {
@@ -79,7 +82,7 @@ contextBridge.exposeInMainWorld('lifecycle', {
 
   ipcRenderer.on('app-metrics', (_event, m) => {
     try {
-      if (!m) return;
+      if (!m || !isAppPage()) return;
       if (!m.enabled) { if (overlay) overlay.style.display = 'none'; return; }
       if (!m.system) return;
       const node = ensureOverlay();
@@ -92,6 +95,10 @@ contextBridge.exposeInMainWorld('lifecycle', {
         lines.push('app  CPU ' + appCpu + '%   ' + fmtGB(m.app.mem));
       }
       node.textContent = lines.join('\n');
+      if (!announced) {
+        announced = true;
+        console.log('[metrics] CPU/RAM overlay active on ' + location.href);
+      }
     } catch (e) { /* the overlay is best-effort */ }
   });
 })();
