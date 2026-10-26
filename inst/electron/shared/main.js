@@ -14,6 +14,7 @@ process.on('uncaughtException', (err) => {
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const fsp = fs.promises;
 const backend = require('./backends/{{backend_module}}');
 const { createAppStore, cmpVersion, platformKey } = require('./backends/appstore');
@@ -387,6 +388,243 @@ function log(level, ...args) {
 // For multi-app mode, backends are loaded dynamically
 let currentBackend = backend;
 let appsManifest = null;
+
+// ---- Resource metrics (CPU / RAM overlay) --------------------------------
+// System totals from os.cpus()/os.freemem(), plus the running app's process
+// tree (R/Python child and its children) read from the OS. Sampling only runs
+// while an app is up, so an idle launcher costs nothing.
+let metricsTimer = null;
+let lastCpuTimes = null;
+let procTimeByPid = new Map();
+let lastProcSampleAt = 0;
+let processTableReader = null;   // 'wmic' | 'powershell' | 'ps' | 'off'
+let metricsBusy = false;
+let metricsReadFailures = 0;
+
+function metricsEnabled() { return appSettings.metricsOverlay !== false; }
+
+function systemCpuPercent() {
+  const cpus = os.cpus() || [];
+  let idle = 0, total = 0;
+  for (const c of cpus) {
+    const t = c.times || {};
+    idle += t.idle || 0;
+    total += (t.user || 0) + (t.nice || 0) + (t.sys || 0) + (t.irq || 0) + (t.idle || 0);
+  }
+  let percent = 0;
+  if (lastCpuTimes && total > lastCpuTimes.total) {
+    const dTotal = total - lastCpuTimes.total;
+    const dIdle = idle - lastCpuTimes.idle;
+    percent = Math.max(0, Math.min(100, (1 - dIdle / dTotal) * 100));
+  }
+  lastCpuTimes = { idle, total };
+  return percent;
+}
+
+// "[[dd-]hh:]mm:ss[.frac]" (ps) -> seconds.
+function parseCpuClock(text) {
+  let s = String(text || '0');
+  let days = 0;
+  const dash = s.indexOf('-');
+  if (dash !== -1) { days = Number(s.slice(0, dash)) || 0; s = s.slice(dash + 1); }
+  const parts = s.split(':').map(Number);
+  let seconds = 0;
+  for (const v of parts) seconds = seconds * 60 + (v || 0);
+  return days * 86400 + seconds;
+}
+
+function parseWmicCsv(stdout) {
+  const rows = [];
+  let header = null;
+  for (const raw of String(stdout).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const fields = line.split(',');
+    if (!header) { header = fields.map((f) => f.trim()); continue; }
+    if (fields.length < header.length) continue;
+    const rec = {};
+    header.forEach((h, i) => { rec[h] = fields[i]; });
+    const pid = Number(rec.ProcessId);
+    if (!pid) continue;
+    rows.push({
+      pid,
+      ppid: Number(rec.ParentProcessId) || 0,
+      rss: Number(rec.WorkingSetSize) || 0,
+      // wmic reports 100 ns units
+      cpuSeconds: ((Number(rec.UserModeTime) || 0) + (Number(rec.KernelModeTime) || 0)) / 1e7,
+    });
+  }
+  return rows;
+}
+
+function parseWmicJson(stdout) {
+  let data;
+  try { data = JSON.parse(stdout); } catch (e) { return []; }
+  if (!Array.isArray(data)) data = data ? [data] : [];
+  return data.map((r) => ({
+    pid: Number(r.ProcessId),
+    ppid: Number(r.ParentProcessId) || 0,
+    rss: Number(r.WorkingSetSize) || 0,
+    cpuSeconds: ((Number(r.UserModeTime) || 0) + (Number(r.KernelModeTime) || 0)) / 1e7,
+  })).filter((r) => r.pid);
+}
+
+function parseUnixPs(stdout) {
+  const rows = [];
+  for (const line of String(stdout).split(/\r?\n/)) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 4) continue;
+    const pid = Number(f[0]);
+    if (!pid) continue;
+    rows.push({
+      pid,
+      ppid: Number(f[1]) || 0,
+      rss: (Number(f[2]) || 0) * 1024,   // ps rss is KiB
+      cpuSeconds: parseCpuClock(f[3]),
+    });
+  }
+  return rows;
+}
+
+function readProcessTableWithPowerShell(done) {
+  const { execFile } = require('child_process');
+  const script = 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,UserModeTime,KernelModeTime | ConvertTo-Json -Compress';
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+    { timeout: 8000, windowsHide: true, maxBuffer: 32 * 1024 * 1024 },
+    (err, stdout) => done(err || !stdout ? [] : parseWmicJson(stdout)));
+}
+
+function readProcessTable(done) {
+  const { execFile } = require('child_process');
+  if (processTableReader === 'off') return done([]);
+  if (process.platform === 'win32') {
+    if (processTableReader === 'powershell') return readProcessTableWithPowerShell(done);
+    const args = ['process', 'get', 'ProcessId,ParentProcessId,WorkingSetSize,UserModeTime,KernelModeTime', '/format:csv'];
+    execFile('wmic.exe', args, { timeout: 5000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      if (err || !stdout) {
+        // wmic is absent from newer Windows builds; use CIM from then on.
+        processTableReader = 'powershell';
+        return readProcessTableWithPowerShell(done);
+      }
+      processTableReader = 'wmic';
+      done(parseWmicCsv(stdout));
+    });
+    return;
+  }
+  processTableReader = 'ps';
+  execFile('ps', ['-A', '-o', 'pid=,ppid=,rss=,time='], { timeout: 5000 }, (err, stdout) => {
+    done(err || !stdout ? [] : parseUnixPs(stdout));
+  });
+}
+
+function backendRootPids() {
+  const b = currentBackend;
+  if (!b) return [];
+  const pids = [];
+  for (const key of ['rProcess', 'pyProcess']) {
+    const child = b[key];
+    if (child && child.pid) pids.push(child.pid);
+  }
+  return pids;
+}
+
+function appUsageFromTable(table) {
+  const roots = backendRootPids();
+  if (!roots.length) { procTimeByPid = new Map(); lastProcSampleAt = 0; return null; }
+  const byPid = new Map();
+  const children = new Map();
+  for (const row of table) {
+    byPid.set(row.pid, row);
+    if (!children.has(row.ppid)) children.set(row.ppid, []);
+    children.get(row.ppid).push(row.pid);
+  }
+  const seen = new Set();
+  const stack = roots.slice();
+  const nextTimes = new Map();
+  let mem = 0;
+  let cpuDelta = 0;
+  while (stack.length) {
+    const pid = stack.pop();
+    if (!pid || seen.has(pid)) continue;
+    seen.add(pid);
+    const row = byPid.get(pid);
+    if (!row) continue;
+    mem += row.rss;
+    const prev = procTimeByPid.get(pid);
+    if (prev != null && row.cpuSeconds >= prev) cpuDelta += row.cpuSeconds - prev;
+    nextTimes.set(pid, row.cpuSeconds);
+    for (const child of (children.get(pid) || [])) stack.push(child);
+  }
+  const now = Date.now();
+  const elapsed = lastProcSampleAt ? (now - lastProcSampleAt) / 1000 : 0;
+  lastProcSampleAt = now;
+  procTimeByPid = nextTimes;
+  const cores = (os.cpus() || []).length || 1;
+  const cpu = elapsed > 0.2 ? Math.min(100, (cpuDelta / elapsed) * 100 / cores) : 0;
+  return { cpu, mem };
+}
+
+function sendMetrics(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const wc = mainWindow.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  try { wc.send('app-metrics', payload); } catch (e) { /* page closed mid-send */ }
+}
+
+function metricsTick() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const enabled = metricsEnabled();
+  // Only an app page shows the overlay, so do not query the OS while the
+  // launcher/lifecycle page is on screen.
+  let onAppPage = false;
+  try { onAppPage = /^https?:/i.test(mainWindow.webContents.getURL() || ''); } catch (e) { /* mid-navigation */ }
+  const payload = {
+    enabled,
+    system: {
+      cpu: systemCpuPercent(),
+      memUsed: os.totalmem() - os.freemem(),
+      memTotal: os.totalmem(),
+    },
+    app: null,
+  };
+  if (!enabled || !onAppPage || !backendRootPids().length) {
+    procTimeByPid = new Map();
+    lastProcSampleAt = 0;
+    sendMetrics(payload);
+    return;
+  }
+  // A slow OS query (large process table, antivirus) must not stack up ticks.
+  if (metricsBusy) return;
+  metricsBusy = true;
+  readProcessTable((table) => {
+    metricsBusy = false;
+    if (!table || !table.length) {
+      // Three empty tables in a row mean the OS query does not work here;
+      // stop spawning it and fall back to the system totals line.
+      if (++metricsReadFailures >= 3 && processTableReader !== 'off') {
+        processTableReader = 'off';
+        log('warn', 'process metrics unavailable; showing system totals only');
+      }
+      table = [];
+    } else {
+      metricsReadFailures = 0;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    payload.app = table.length ? appUsageFromTable(table) : null;
+    sendMetrics(payload);
+  });
+}
+
+function startMetrics() {
+  if (metricsTimer) return;
+  metricsTick();
+  metricsTimer = setInterval(metricsTick, 2000);
+  if (metricsTimer.unref) metricsTimer.unref();
+}
+
+function stopMetrics() {
+  if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+}
 
 // Check if this is a multi-app build
 const manifestPath = path.join(__dirname, 'apps-manifest.json');
@@ -878,6 +1116,13 @@ function storeCommand(payload) {
 
 // Top-level Settings menu: one item per store function. Input-style items open a
 // focused dialog in the launcher instead of one crowded sheet.
+function toggleMetricsOverlay() {
+  appSettings.metricsOverlay = !metricsEnabled();
+  saveSettings();
+  createMenu();
+  if (mainWindow && !mainWindow.isDestroyed()) metricsTick();
+}
+
 function buildSettingsSubmenu() {
   var sub = [];
   sub.push({ label: 'Catalog\u2026', click: function () { storeCommand({ cmd: 'catalog' }); } });
@@ -894,6 +1139,10 @@ function buildSettingsSubmenu() {
   });
   // A plain item with a leading check mark keeps the whole Settings submenu from
   // reserving Windows' check-mark gutter (which would indent every item).
+  sub.push({
+    label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM Overlay',
+    click: toggleMetricsOverlay
+  });
   sub.push({
     label: (appSettings.crashReporting ? '\u2713 ' : '') + 'Save Crash Reports Locally',
     click: function () {
@@ -1110,7 +1359,10 @@ function createMenu() {
         { role: 'zoomIn' },
         { role: 'zoomOut' },
         { type: 'separator' },
-        { role: 'togglefullscreen' }
+        { role: 'togglefullscreen' },
+        { type: 'separator' },
+        // Available while an app runs, when the Settings menu is hidden.
+        { label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM Overlay', click: toggleMetricsOverlay }
       ]
     },
     {
@@ -2594,7 +2846,11 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+  createWindow();
+
+  // Start the CPU/RAM sampler after the window exists; it samples system-wide
+  // figures always and the app process tree only while an app is running.
+  startMetrics();
     }
   });
 });
@@ -2616,6 +2872,7 @@ app.on('before-quit', () => {
 {{/tray_enabled}}
 
 app.on('before-quit', () => {
+  stopMetrics();
   if (currentBackend) currentBackend.stop();
   // The shared shinylive server is stopped ONLY here, at quit.
   stopSharedShinyliveServer();

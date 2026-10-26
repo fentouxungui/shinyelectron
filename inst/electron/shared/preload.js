@@ -49,3 +49,49 @@ contextBridge.exposeInMainWorld('lifecycle', {
   setQuickRunOrder: (data) => ipcRenderer.send('quick-run-order', data),
   notifyTheme: (mode) => ipcRenderer.send('theme-changed', mode)
 });
+
+// --- CPU / RAM overlay (app pages only) -----------------------------------
+// The main process samples system totals and the running app's process tree
+// and pushes them here. Only pages served by the app backend (http/https) get
+// the overlay; the shell's own file:// pages (launcher, lifecycle) never do.
+(function installMetricsOverlay() {
+  let isAppPage = false;
+  try { isAppPage = location.protocol === 'http:' || location.protocol === 'https:'; } catch (e) { /* about:blank */ }
+  if (!isAppPage) return;
+
+  let overlay = null;
+  const fmtGB = (bytes) => (Number(bytes || 0) / 1073741824).toFixed(1) + ' GB';
+
+  function ensureOverlay() {
+    if (overlay && overlay.isConnected) return overlay;
+    overlay = document.createElement('div');
+    overlay.id = '__shinyelectron_metrics';
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.style.cssText = [
+      'position:fixed', 'right:12px', 'bottom:12px', 'z-index:2147483647',
+      'padding:6px 10px', 'border-radius:8px', 'background:rgba(15,23,42,0.78)',
+      'color:#f8fafc', 'font:12px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif',
+      'pointer-events:none', 'white-space:pre', 'box-shadow:0 2px 8px rgba(0,0,0,0.25)'
+    ].join(';');
+    (document.body || document.documentElement).appendChild(overlay);
+    return overlay;
+  }
+
+  ipcRenderer.on('app-metrics', (_event, m) => {
+    try {
+      if (!m) return;
+      if (!m.enabled) { if (overlay) overlay.style.display = 'none'; return; }
+      if (!m.system) return;
+      const node = ensureOverlay();
+      node.style.display = '';
+      const lines = [
+        'CPU ' + Math.round(m.system.cpu) + '%   RAM ' + fmtGB(m.system.memUsed) + ' / ' + fmtGB(m.system.memTotal)
+      ];
+      if (m.app) {
+        const appCpu = m.app.cpu < 10 ? m.app.cpu.toFixed(1) : String(Math.round(m.app.cpu));
+        lines.push('app  CPU ' + appCpu + '%   ' + fmtGB(m.app.mem));
+      }
+      node.textContent = lines.join('\n');
+    } catch (e) { /* the overlay is best-effort */ }
+  });
+})();
