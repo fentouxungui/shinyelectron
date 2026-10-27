@@ -277,8 +277,10 @@ function createAppStore(options) {
   const CATALOG_TTL_MS = 60000;
   const running = new Map();
 
-  // Startup self-heal: forget installs whose files no longer exist.
+  // Startup self-heal: forget installs and shared entries whose files no
+  // longer exist.
   reconcileInstalled();
+  reconcileShared();
 
   function loadState() {
     try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); }
@@ -300,6 +302,26 @@ function createAppStore(options) {
   }
   function isInstalled(id) {
     return installedFilesPresent(state.apps && state.apps[id]);
+  }
+  // An installed R package directory always carries its DESCRIPTION. A folder
+  // left half-copied (or deleted) satisfies state.json but cannot be loaded.
+  function packagePresent(dir) {
+    try { return fs.existsSync(path.join(dir, 'DESCRIPTION')); } catch (e) { return false; }
+  }
+  // Shared-library records whose folder is gone must not survive: the next
+  // install would see a matching version, skip the copy, delete the bundle's
+  // own copy, and leave the app unable to load the package.
+  function reconcileShared() {
+    let changed = false;
+    for (const name of Object.keys(state.shared || {})) {
+      if (packagePresent(path.join(sharedLib, name))) continue;
+      log(`warn: shared package ${name} is missing; dropping its record so the next install restores it`);
+      delete state.shared[name];
+      changed = true;
+    }
+    if (!changed) return false;
+    try { saveState(); } catch (e) { log('warn: could not save state:', e && e.message); }
+    return true;
   }
   // Drop records whose files are gone and release their shared-package refs.
   // Runs at startup so a state.json written by an older/interrupted shell
@@ -584,22 +606,46 @@ function createAppStore(options) {
   async function reconcilePackages(appId, appDir, packages, onProgress = () => {}) {
     for (const pkg of packages) {
       const src = path.join(appDir, pkg.path);
-      const shared = state.shared[pkg.name];
+      const sharedDir = path.join(sharedLib, pkg.name);
+      const privateDir = path.join(privateRoot, appId, pkg.name);
+      const haveSrc = packagePresent(src);
+      let shared = state.shared[pkg.name];
+      // A record whose folder is gone is worse than no record: the bundle's own
+      // copy is deleted below, and a reinstall would skip the copy because the
+      // version still "matches". Drop it so this install restores the files.
+      if (shared && !packagePresent(sharedDir)) {
+        log(`warn: shared copy of ${pkg.name} is missing; restoring it from ${appId}`);
+        delete state.shared[pkg.name];
+        shared = undefined;
+      }
+
+      let target;
       if (!shared) {
-        await copyDir(src, path.join(sharedLib, pkg.name));
+        if (!haveSrc) throw new Error(`package ${pkg.name} is missing from the bundle and the shared library`);
+        await copyDir(src, sharedDir);
+        if (!packagePresent(sharedDir)) throw new Error(`could not link ${pkg.name} into the shared library`);
         state.shared[pkg.name] = { version: pkg.version, refs: [appId] };
+        target = sharedDir;
       } else if (shared.version === pkg.version) {
         if (!shared.refs.includes(appId)) shared.refs.push(appId);
+        target = sharedDir;
       } else {
         log(`conflict: ${pkg.name} shared=${shared.version} wanted=${pkg.version} (${appId})`);
-        await copyDir(src, path.join(privateRoot, appId, pkg.name));
+        if (!packagePresent(privateDir)) {
+          if (!haveSrc) throw new Error(`package ${pkg.name} ${pkg.version} is missing from the bundle`);
+          await copyDir(src, privateDir);
+          if (!packagePresent(privateDir)) throw new Error(`could not link ${pkg.name} into the private library`);
+        }
+        target = privateDir;
       }
+
       // The app runs with .libPaths = <private>:<shared>, so the bundle's own
-      // copy under rlib/ is never loaded. Remove it after it has been copied
-      // into the shared (or private) library so a shared package is stored
-      // exactly once. copyDir() above has completed, so a failure leaves src
-      // in place.
-      await fsp.rm(src, { recursive: true, force: true }).catch(() => {});
+      // copy under rlib/ is never loaded. Remove it only after the library that
+      // will be used actually holds the package, so a failed link cannot leave
+      // the app without it.
+      if (packagePresent(target)) {
+        await fsp.rm(src, { recursive: true, force: true }).catch(() => {});
+      }
       onProgress({ phase: 'linking', percent: 100, statusText: 'linking ' + pkg.name });
     }
     saveState();
@@ -652,6 +698,16 @@ function createAppStore(options) {
     const entry = app.meta && app.meta.entry;
     const appPath = entry ? path.join(app.dir, path.dirname(entry)) : path.join(app.dir, 'app');
     const libPaths = [path.join(privateRoot, id), sharedLib];
+    // A bundle whose packages are gone cannot start; fail with an actionable
+    // message instead of a bare "there is no package called ..." from R.
+    const missing = (app.packages || []).filter((name) =>
+      !packagePresent(path.join(privateRoot, id, name)) && !packagePresent(path.join(sharedLib, name)));
+    if (missing.length) {
+      const e = new Error(`${id} cannot start: missing package${missing.length > 1 ? 's' : ''} ` +
+        `${missing.join(', ')}. Uninstall and install the app again to restore them.`);
+      e.code = 'MISSING_PACKAGES';
+      throw e;
+    }
     log(`run ${id}: appPath=${appPath} libs=${libPaths.join(path.delimiter)}`);
     const handle = await startBackend({ appId: id, appPath, libPaths });
     running.set(id, handle);
@@ -808,7 +864,8 @@ function createAppStore(options) {
       const e = state.shared[n] || {};
       // Refs to apps that are no longer installed are dead refs, not users.
       const refs = (e.refs || []).filter(function (r) { return !!state.apps[r]; });
-      return refs.length === 0;
+      // A record whose folder is gone is unusable even with live refs.
+      return refs.length === 0 || !packagePresent(path.join(sharedLib, n));
     });
     const total = cacheFiles.length + orphanShared.length;
     report(0, total, total ? 'Cleaning up\u2026' : 'Nothing to clean');

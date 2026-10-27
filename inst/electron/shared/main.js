@@ -837,9 +837,9 @@ async function runStoreApp(appId) {
     try { await appStore.run(appId); }
     catch (e) {
       log('error', 'run_app failed:', e && e.message);
-      // A missing install was dropped from the store: tell the launcher so the
-      // stale card is removed instead of failing silently on every click.
-      if (e && e.code === 'NOT_INSTALLED' && mainWindow && !mainWindow.isDestroyed()) {
+      // A missing install or missing packages leave the launcher card in a
+      // state the user can act on, instead of failing silently on every click.
+      if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES') && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('store-status', { id: appId, state: 'error', error: e.message });
       }
     }
