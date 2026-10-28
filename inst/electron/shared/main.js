@@ -1378,9 +1378,12 @@ function createMenu() {
         { role: 'zoomOut' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        { type: 'separator' },
-        // Available while an app runs, when the Settings menu is hidden.
-        { label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
+        // Settings holds this toggle but is hidden while an app runs, so show
+        // it here only then: the item never appears in two menus at once.
+        ...(isLauncherVisible ? [] : [
+          { type: 'separator' },
+          { label: (metricsEnabled() ? '✓ ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
+        ])
       ]
     },
     {

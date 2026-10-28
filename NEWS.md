@@ -63,8 +63,13 @@
 
 * A running app can show CPU/RAM in the window title bar: the system total plus
   the app's own process tree (the R/Python child and its children). Toggle it
-  from Settings or View > Show CPU/RAM in Title Bar; it is on by default.
+  from Settings on the launcher or from View while an app runs; it is on by
+  default.
   Sampling runs only while an app page is open and adds no dependencies.
+
+* New `app.launcher_title` sets the heading of the multi-app launcher page
+  independently of `app.name`; leave it unset to keep the app name. The
+  launcher no longer shows "Your installed applications" under the heading.
 
 * `installer.allow_to_change_installation_directory: true` adds a page to the
   Windows setup wizard where users choose the installation folder. It requires

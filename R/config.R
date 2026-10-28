@@ -13,6 +13,8 @@ default_config <- function() {
   list(
     app = list(
       name = NULL,
+      # Multi-app launcher heading; NULL falls back to app.name.
+      launcher_title = NULL,
       slug = NULL,
       version = SHINYELECTRON_DEFAULTS$app_version,
       description = NULL,
@@ -581,8 +583,9 @@ validate_config <- function(config) {
     }
   }
 
-  # Validate the app metadata that fills package.json and the About dialog.
-  for (key in c("description", "copyright")) {
+  # Validate the single-string app settings used in package.json, the About
+  # dialog, and the launcher heading.
+  for (key in c("description", "copyright", "launcher_title")) {
     value <- config$app[[key]]
     if (!is.null(value) && !(is.character(value) && length(value) == 1L)) {
       cli::cli_warn(c(
@@ -718,6 +721,8 @@ app:
   # the name changes.
   {{{slug_line}}}
   version: "1.0.0"
+  # Multi-app launcher heading; null = the app name
+  # launcher_title: null
   # Uncomment to describe the app in Help > About and the installer metadata
   # description: null        # null = "<slug> - Shiny Electron App"
   # author: null             # "Name <email> (url)", or a map of name, email, url

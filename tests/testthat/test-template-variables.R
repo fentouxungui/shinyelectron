@@ -341,6 +341,25 @@ test_that("HTML markup keeps HTML-escaping the app name", {
   expect_true(any(grepl("title: 'Close R&D \\u003CLab>',", main, fixed = TRUE)))
 })
 
+test_that("app.launcher_title names the launcher heading, else the app name", {
+  launcher_title <- function(config) {
+    generate_template_variables(
+      app_name = "Test App", app_slug = "test-app", app_type = "r-shiny",
+      runtime_strategy = "system", icon = NULL, backend_module = "native-r.js",
+      brand = NULL, config = config
+    )$launcher_title
+  }
+  expect_identical(launcher_title(list()), "Test App")
+  expect_identical(
+    launcher_title(list(app = list(launcher_title = "Shiny Applications"))),
+    "Shiny Applications"
+  )
+  expect_identical(
+    launcher_title(list(app = list(launcher_title = ""))),
+    "Test App"
+  )
+})
+
 test_that("lifecycle and launcher scripts keep hostile settings inside their values", {
   out <- render_html_pages()
   shared <- system.file("electron", "shared", package = "shinyelectron")

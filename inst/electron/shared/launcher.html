@@ -12,7 +12,8 @@
       background: {{brand_background}};
       color: #1e293b;
       min-height: 100vh;
-      padding: 40px;
+      /* Tighter top gap under the native menu bar; other sides unchanged. */
+      padding: 16px 40px 40px;
     }
     .header { text-align: center; margin-bottom: 20px; }
     .header h1 { font-size: 24px; font-weight: 600; margin-bottom: 8px; }
@@ -208,8 +209,8 @@
 </head>
 <body>
   <div class="header">
-    <h1>{{app_name}}</h1>
-    <p id="subtitle">Your installed applications</p>
+    <h1>{{launcher_title}}</h1>
+    <p id="subtitle" hidden></p>
     <button id="manage-btn" class="btn" type="button">Manage apps</button>
   </div>
 
@@ -483,7 +484,9 @@
       document.getElementById('filters').hidden = false;
       document.getElementById('install-bundle-btn').hidden = !manager;
       document.getElementById('done-btn').hidden = !manager;
-      document.getElementById('subtitle').textContent = manager ? 'Manage applications' : 'Your installed applications';
+      var subtitle = document.getElementById('subtitle');
+      subtitle.textContent = manager ? 'Manage applications' : '';
+      subtitle.hidden = !manager;
       var tabs = document.querySelectorAll('#tabs .tab');
       for (var i = 0; i < tabs.length; i++) {
         var b = tabs[i];

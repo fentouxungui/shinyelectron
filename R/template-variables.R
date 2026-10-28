@@ -96,10 +96,14 @@ generate_template_variables <- function(app_name, app_slug, app_type,
   log_dir <- config$app$log_dir %||% ""
   preloader_background <- config$preloader$background %||%
     (brand$color$background %||% "#f8fafc")
+  # Multi-app launcher heading: app.launcher_title, else the app name.
+  launcher_title <- config$app$launcher_title
+  if (!is_nonempty_string(launcher_title)) launcher_title <- app_name
 
   list(
     app_name = app_name,
     app_name_js = js_str(app_name),
+    launcher_title = launcher_title,
     app_slug = app_slug,
     app_type = app_type,
     app_version = app_version,
