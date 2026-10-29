@@ -129,7 +129,9 @@
   no longer leaves Help/About and the menu describing that app. When an app
   exits cleanly on its own, the shell returns to the launcher and clears its
   "Running" state; the exit handler no longer waits for an `app_exit` event
-  that has already fired.
+  that has already fired. Uninstall and update now wait for the R process to
+  actually exit before deleting or replacing files, so a Windows file lock can
+  no longer leave part of an uninstalled app behind.
 
 * shinyelectron now imports rlang. cli builds `cli_abort()` and `cli_warn()` on
   rlang but only suggests it. Without rlang installed, errors from

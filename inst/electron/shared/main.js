@@ -2010,18 +2010,29 @@ function createWindow() {
             return new Promise(function (done) {
               var settled = false;
               var timer = null;
+              var onExit = null;
               var finish = function () {
                 if (settled) return;
                 settled = true;
                 if (timer) { clearTimeout(timer); timer = null; }
-                b.removeListener('status', onExit);
+                if (onExit) b.removeListener('status', onExit);
                 done();
               };
-              var onExit = function (d) { if (d && d.phase === 'app_exit') finish(); };
-              b.on('status', onExit);
-              // Assigned before stop() so a synchronous app_exit still clears it.
               timer = setTimeout(finish, 120000);
-              b.stop();
+              var stopped = null;
+              try { stopped = b.stop(); } catch (e) { finish(); return; }
+              // The native backend emits app_exit before the child is gone and
+              // returns a promise that resolves when it actually exits. Wait
+              // for that: uninstall/update delete or replace files right after,
+              // and on Windows deleting while R still holds DLLs leaves part
+              // of the app behind.
+              if (stopped && typeof stopped.then === 'function') {
+                stopped.then(finish, finish);
+              } else {
+                // A backend that reports no completion: the stop was
+                // synchronous, so there is nothing more to wait for.
+                finish();
+              }
             });
           }
         });
