@@ -117,6 +117,20 @@
 
 ## Minor improvements and fixes
 
+* The CPU/RAM title no longer sticks after returning to the launcher. A
+  process-table read that finished after the app page was gone could write the
+  app's name and a CPU/RAM suffix over the launcher's title; sampling now stops
+  at navigation, discards late results, and a non-app page reclaims its own
+  `<title>`. Turning the overlay off on the launcher also no longer titles the
+  window with the last app's name.
+
+* Returning to the launcher now names the running app in the confirmation
+  (catalog apps are not in the baked suite manifest), and a failed app start
+  no longer leaves Help/About and the menu describing that app. When an app
+  exits cleanly on its own, the shell returns to the launcher and clears its
+  "Running" state; the exit handler no longer waits for an `app_exit` event
+  that has already fired.
+
 * shinyelectron now imports rlang. cli builds `cli_abort()` and `cli_warn()` on
   rlang but only suggests it. Without rlang installed, errors from
   `cli_abort()` showed "there is no package called 'rlang'" instead of their

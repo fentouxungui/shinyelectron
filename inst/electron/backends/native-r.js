@@ -552,6 +552,12 @@ class NativeRBackend extends EventEmitter {
           const msg = 'R exited before the Shiny server was ready.';
           this.emit('status', { phase: 'error', message: msg, detail: { stderr } });
           settle(reject, new Error(`${msg}\n\nR stderr output:\n${stderr}`));
+        } else {
+          // A clean exit after the server was ready: the app shut itself down.
+          // Report it so the shell can leave the dead page and clear the
+          // running state. stop()-initiated exits never reach here because
+          // stop() clears this.rProcess before killing the child.
+          this.emit('status', { phase: 'app_exit', unexpected: true, message: 'R process exited.' });
         }
       };
 

@@ -400,8 +400,35 @@ let lastProcSampleAt = 0;
 let processTableReader = null;   // 'wmic' | 'powershell' | 'ps' | 'off'
 let metricsBusy = false;
 let metricsReadFailures = 0;
+// True while the window title carries our CPU/RAM suffix, so leaving an app
+// page can hand the title back to the page instead of leaving it stale.
+let metricsTitleActive = false;
 
 function metricsEnabled() { return appSettings.metricsOverlay !== false; }
+
+function windowLoading() {
+  try { return !mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading(); }
+  catch (e) { return true; }
+}
+
+function metricsPageActive() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  try {
+    if (mainWindow.webContents.isLoading()) return false;
+    return /^https?:/i.test(mainWindow.webContents.getURL() || '');
+  } catch (e) { return false; }
+}
+
+// Remove a CPU/RAM title and hand the window back to the page's own <title>.
+// `force` is for turning the overlay off when the page is not an app page.
+function restorePageTitle(force) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!metricsTitleActive && !force) return;
+  var title = '';
+  try { title = String(mainWindow.webContents.getTitle() || '').trim(); } catch (e) {}
+  mainWindow.setTitle(title || '{{{app_name_js}}}');
+  metricsTitleActive = false;
+}
 
 function systemCpuPercent() {
   const cpus = os.cpus() || [];
@@ -578,24 +605,32 @@ function setMetricsTitle(sys, app) {
     (sys.memUsed / 1073741824).toFixed(1) + '/' + (sys.memTotal / 1073741824).toFixed(1) + ' GB';
   if (app) text += '  (app ' + fmtPct(app.cpu) + '% \u00b7 ' + fmtGB(app.mem) + ')';
   mainWindow.setTitle(text);
+  metricsTitleActive = true;
 }
 
 function metricsTick() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const enabled = metricsEnabled();
-  // Only an app page shows metrics; while the launcher/lifecycle page is on
-  // screen its own <title> stays in charge.
-  let onAppPage = false;
-  try { onAppPage = /^https?:/i.test(mainWindow.webContents.getURL() || ''); } catch (e) { /* mid-navigation */ }
   // Called every tick even when unused so the CPU delta keeps a steady window.
   const sys = {
     cpu: systemCpuPercent(),
     memUsed: os.totalmem() - os.freemem(),
     memTotal: os.totalmem(),
   };
+  // A title write during navigation races the incoming page's <title>: wait
+  // for the load to finish, then decide from the committed URL.
+  if (windowLoading()) {
+    procTimeByPid = new Map();
+    lastProcSampleAt = 0;
+    return;
+  }
+  // Only an app page shows metrics; on the launcher/lifecycle page, drop any
+  // suffix written earlier and let the page's own <title> take over.
+  const onAppPage = metricsPageActive();
   if (!enabled || !onAppPage) {
     procTimeByPid = new Map();
     lastProcSampleAt = 0;
+    if (!onAppPage) restorePageTitle();
     return;
   }
   if (!backendRootPids().length) {
@@ -609,6 +644,14 @@ function metricsTick() {
   metricsBusy = true;
   readProcessTable((table) => {
     metricsBusy = false;
+    // The read is asynchronous: the window may have left the app page (or
+    // started navigating) while it ran. Never write a stale app title then.
+    if (!metricsEnabled() || !metricsPageActive()) {
+      procTimeByPid = new Map();
+      lastProcSampleAt = 0;
+      if (!windowLoading()) restorePageTitle();
+      return;
+    }
     if (!table || !table.length) {
       // Three empty tables in a row mean the OS query does not work here;
       // stop spawning it and show the system figures only.
@@ -788,13 +831,14 @@ function setWindowTitleForApp(appId, force) {
   var meta = appMetaFor(appId);
   var label = ((meta && meta.name) || appId || '').trim();
   if (!label) return;
-  if (force) { mainWindow.setTitle(label); return; }
+  if (force) { mainWindow.setTitle(label); metricsTitleActive = false; return; }
   var current = '';
   try { current = String(mainWindow.webContents.getTitle() || '').trim(); } catch (e) {}
   var shellName = '{{{app_name_js}}}';
   // Keep a real title the app supplied; replace the shell's name or a bare URL.
   if (!current || current === shellName || /^https?:\/\//i.test(current)) {
     mainWindow.setTitle(label);
+    metricsTitleActive = false;
   }
 }
 
@@ -837,6 +881,16 @@ async function runStoreApp(appId) {
     try { await appStore.run(appId); }
     catch (e) {
       log('error', 'run_app failed:', e && e.message);
+      // The launcher is still on screen when run() rejects before starting a
+      // backend (missing install/packages): drop the app context set above so
+      // Help/About and the menu describe the shell again.
+      if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES')) {
+        currentAppMeta = null;
+        lastSelectedAppId = null;
+        {{#menu_enabled}}
+        createMenu();
+        {{/menu_enabled}}
+      }
       // A missing install or missing packages leave the launcher card in a
       // state the user can act on, instead of failing silently on every click.
       if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES') && mainWindow && !mainWindow.isDestroyed()) {
@@ -1019,7 +1073,9 @@ async function showAboutDialog() {
   function leaveToLauncher() {
     if (!appsManifest) return;
     var cur = appsManifest.apps.find(function(a) { return a.id === lastSelectedAppId; });
-    var curName = (cur && cur.name) || '{{{app_name_js}}}';
+    // Catalog apps are not in the baked suite manifest, so prefer the running
+    // app's own metadata over the placeholder lookup.
+    var curName = (currentAppMeta && currentAppMeta.name) || (cur && cur.name) || '{{{app_name_js}}}';
 
     var { dialog } = require('electron');
     dialog.showMessageBox(mainWindow, {
@@ -1136,8 +1192,15 @@ function toggleMetricsOverlay() {
   if (metricsEnabled()) {
     metricsTick();
   } else if (mainWindow && !mainWindow.isDestroyed()) {
-    // Drop the suffix immediately; the app name stays.
-    setWindowTitleForApp(lastSelectedAppId || '', true);
+    // Drop the suffix immediately. On an app page keep the app name; on the
+    // launcher/lifecycle page hand the title back to the page.
+    var onAppPage = false;
+    try { onAppPage = /^https?:/i.test(mainWindow.webContents.getURL() || ''); } catch (e) {}
+    if (onAppPage) {
+      setWindowTitleForApp((currentAppMeta && currentAppMeta.id) || lastSelectedAppId || '', true);
+    } else {
+      restorePageTitle(true);
+    }
   }
 }
 
@@ -1836,13 +1899,37 @@ function createWindow() {
   // <title>, so the title would otherwise stay at the shell name from the
   // lifecycle/launcher page. A title the app itself supplies is kept.
   mainWindow.on('page-title-updated', (event, title) => {
-    if (!currentAppMeta) return;
+    // Only an app page (http) defers to the running app; the launcher and
+    // lifecycle pages always own their title, even if the last app's metadata
+    // is still set.
+    let onAppPage = false;
+    try { onAppPage = /^https?:/i.test(mainWindow.webContents.getURL() || ''); } catch (e) {}
+    if (!currentAppMeta || !onAppPage) {
+      // A stale CPU/RAM suffix is dropped.
+      metricsTitleActive = false;
+      return;
+    }
     const own = String(currentAppMeta.name || '').trim() || String(lastSelectedAppId || '');
     if (!own) return;
     const next = String(title || '').trim();
-    if (next && next !== '{{{app_name_js}}}') return;
+    if (next && next !== '{{{app_name_js}}}') {
+      // A title the app supplies itself wins over ours.
+      metricsTitleActive = false;
+      return;
+    }
     event.preventDefault();
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitle(own);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setTitle(own);
+      metricsTitleActive = false;
+    }
+  });
+
+  // A CPU/RAM write can race the incoming page's title during navigation.
+  // Once a non-app page finishes loading, its own <title> wins.
+  mainWindow.webContents.on('did-finish-load', () => {
+    let url = '';
+    try { url = mainWindow.webContents.getURL() || ''; } catch (e) {}
+    if (!/^https?:/i.test(url)) restorePageTitle();
   });
 
   // --- App store wiring (multi-app) -------------------------------------
@@ -1858,7 +1945,7 @@ function createWindow() {
         appLogWrite('[' + data.phase + '] ' + (data.message || ''));
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifecycle-status', data);
         if (data.phase === 'server_ready') serverRunning = true;
-        if (data.phase === 'stopping_server' || data.phase === 'error' || data.phase === 'server_crashed') serverRunning = false;
+        if (data.phase === 'stopping_server' || data.phase === 'error' || data.phase === 'server_crashed' || data.phase === 'app_exit') serverRunning = false;
       });
       currentBackend.on('output', function (o) { appLogWrite((o && o.stream ? o.stream : 'out') + ': ' + ((o && o.line) || '')); });
       currentBackend.on('error', function (err) {
@@ -1869,8 +1956,22 @@ function createWindow() {
       // (e.g. after Back to Launcher stops it), so the launcher shows Run again.
       currentBackend.on('status', function (d) {
         if (!d) return;
-        if (d.phase === 'app_exit') { appLogWrite('[app_exit]'); closeAppLog(); }
-        if (d.phase === 'app_exit' && appStore) appStore.stop(opts.appId).catch(function () {});
+        if (d.phase === 'app_exit') {
+          appLogWrite('[app_exit]' + (d.unexpected ? ' (unexpected)' : ''));
+          closeAppLog();
+          // The process is already gone; clear the running handle instead of
+          // calling stop(), whose shutdown listener would wait for an app_exit
+          // that has already been emitted.
+          if (appStore) appStore.forget(opts.appId);
+          // The app ended on its own (not through Back to Launcher or Stop):
+          // leave the now-dead page and show the launcher.
+          if (d.unexpected) {
+            lastSelectedAppId = null;
+            currentAppMeta = null;
+            if (currentBackend) { currentBackend.removeAllListeners(); currentBackend = null; }
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+          }
+        }
         if (d.phase === 'server_crashed') {
           // The R process died. Forget the app and its address, otherwise the
           // launcher keeps showing it as running and "Open" loads a dead URL.
