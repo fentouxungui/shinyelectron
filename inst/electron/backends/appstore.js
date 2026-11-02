@@ -3,8 +3,9 @@
  * App-layer store for the ShinyApps shell (Electron main process).
  * Zero npm dependencies (Node built-in zlib for zip extraction).
  *
- * Robust bundle download: progress + idle timeout + resume (HTTP Range)
- * + retry + size/checksum verification. update() forwards install progress.
+ * Robust bundle download: optional mirror fallback + four parallel range
+ * requests + progress + idle timeout + resume + retry + size/checksum
+ * verification. update() forwards install progress.
  *
  * Layout under <userData>: state.json, apps/, lib/, private/, store-cache/
  */
@@ -16,6 +17,7 @@ const https = require('https');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { Worker } = require('worker_threads');
+const { once } = require('events');
 
 const REDIRECT = [301, 302, 303, 307, 308];
 
@@ -48,7 +50,7 @@ function cancelError() {
   return e;
 }
 
-async function downloadToFile(url, dest, opts = {}) {
+async function downloadToFileSingle(url, dest, opts = {}) {
   const onProgress = opts.onProgress || (() => {});
   const expectedSize = opts.expectedSize || 0;
   const idleMs = opts.idleMs || 60000;
@@ -113,6 +115,215 @@ async function downloadToFile(url, dest, opts = {}) {
   // Every attempt failed: do not leave a partial archive in the cache.
   await fsp.rm(part, { force: true }).catch(() => {});
   throw lastErr || new Error('download failed');
+}
+
+// ---- Parallel (range) download -------------------------------------------
+// GitHub and most mirrors support HTTP Range. One TCP connection often tops
+// out at a few hundred KB/s on high-latency links; four ranges in parallel are
+// much faster and need no change to the release pipeline.
+
+function segmentedUnsupported(message) {
+  const e = new Error(message || 'server does not support parallel range requests');
+  e.code = 'SEGMENTED_UNSUPPORTED';
+  return e;
+}
+
+// Build download candidates: an optional mirror template first, GitHub last.
+// `{url}` is replaced by the original URL; a template without it is a prefix.
+// The caller still verifies size and SHA-256, so a mirror cannot alter a bundle.
+function downloadUrls(original, mirror) {
+  const urls = [];
+  const template = String(mirror || '').trim();
+  if (template) {
+    if (template.includes('{url}')) urls.push(template.split('{url}').join(original));
+    else urls.push(template.replace(/\/+$/, '') + '/' + original);
+  }
+  urls.push(original);
+  return Array.from(new Set(urls.filter(Boolean)));
+}
+
+async function probeDownloadSize(url, signal) {
+  if (signal && signal.aborted) throw cancelError();
+  const res = await httpGet(url, { Range: 'bytes=0-0' });
+  try {
+    if (res.statusCode === 206) {
+      const m = /\/(\d+)\s*$/.exec(String(res.headers['content-range'] || ''));
+      if (m) return Number(m[1]);
+    } else if (res.statusCode === 200) {
+      const len = Number(res.headers['content-length'] || 0);
+      if (len) return len;
+    }
+  } finally {
+    try { res.destroy(); } catch (e) {}
+  }
+  throw segmentedUnsupported('server did not report the file size');
+}
+
+async function fetchRangeToFile(url, start, end, file, opts) {
+  const want = end - start + 1;
+  const attempts = opts.attempts || 3;
+  const idleMs = opts.idleMs || 60000;
+  const signal = opts.signal || null;
+  const onBytes = opts.onBytes || (() => {});
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (signal && signal.aborted) throw cancelError();
+    let have = 0;
+    try { have = fs.statSync(file).size; } catch (e) { have = 0; }
+    if (have >= want) return;
+    const from = start + have;
+    let res;
+    try {
+      res = await httpGet(url, { Range: `bytes=${from}-${end}` });
+    } catch (e) {
+      if (attempt === attempts) throw e;
+      continue;
+    }
+    if (res.statusCode !== 206) {
+      res.destroy();
+      throw segmentedUnsupported('server ignored the Range request (HTTP ' + res.statusCode + ')');
+    }
+    const m = /bytes\s+(\d+)-(\d+)\//.exec(String(res.headers['content-range'] || ''));
+    if (!m || Number(m[1]) !== from) {
+      res.destroy();
+      throw segmentedUnsupported('unexpected Content-Range from server');
+    }
+    const out = fs.createWriteStream(file, { flags: have > 0 ? 'a' : 'w' });
+    let idle = setTimeout(() => res.destroy(new Error('download stalled')), idleMs);
+    try {
+      await new Promise((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(idle);
+          const e = cancelError();
+          try { res.destroy(e); } catch (x) {}
+          try { out.destroy(); } catch (x) {}
+          reject(e);
+        };
+        const done = (fn) => (v) => {
+          if (signal) signal.removeEventListener('abort', onAbort);
+          clearTimeout(idle);
+          fn(v);
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        res.on('data', (c) => {
+          onBytes(c.length);
+          clearTimeout(idle);
+          idle = setTimeout(() => res.destroy(new Error('download stalled')), idleMs);
+        });
+        res.pipe(out);
+        out.on('finish', done(resolve));
+        out.on('error', done(reject));
+        res.on('error', done(reject));
+      });
+    } catch (e) {
+      try { out.destroy(); } catch (x) {}
+      if (e && e.code === 'CANCELLED') throw e;
+      if (e && e.code === 'SEGMENTED_UNSUPPORTED') throw e;
+      if (attempt === attempts) throw e;
+      continue;
+    } finally {
+      clearTimeout(idle);
+    }
+    if (fs.statSync(file).size - start >= want) return;
+    if (attempt === attempts) throw new Error('incomplete segment');
+  }
+}
+
+async function downloadToFileSegmented(url, dest, opts) {
+  const onProgress = opts.onProgress || (() => {});
+  const signal = opts.signal || null;
+  const expectedSize = Number(opts.expectedSize || 0);
+  const total = expectedSize || await probeDownloadSize(url, signal);
+  if (!total) throw segmentedUnsupported('unknown file size');
+  if (total < Number(opts.segmentThreshold || 8 * 1024 * 1024)) {
+    throw segmentedUnsupported('file is too small to split');
+  }
+  if (signal && signal.aborted) throw cancelError();
+
+  const connections = Math.max(1, Math.min(8, Number(opts.connections || 4)));
+  const partDir = dest + '.parts';
+  const part = dest + '.part';
+  await fsp.mkdir(path.dirname(dest), { recursive: true });
+  await fsp.rm(partDir, { recursive: true, force: true }).catch(() => {});
+  await fsp.mkdir(partDir, { recursive: true });
+
+  const base = Math.floor(total / connections);
+  const segments = [];
+  for (let i = 0; i < connections; i++) {
+    const start = i * base;
+    const end = i === connections - 1 ? total - 1 : start + base - 1;
+    if (start > end) continue;
+    segments.push({ start, end, file: path.join(partDir, 'seg-' + i) });
+  }
+
+  let received = 0;
+  onProgress(0, 0, total);
+  const controller = new AbortController();
+  const onOuterAbort = () => controller.abort();
+  if (signal) signal.addEventListener('abort', onOuterAbort, { once: true });
+  try {
+    await Promise.all(segments.map((s) => fetchRangeToFile(url, s.start, s.end, s.file, {
+      signal: controller.signal,
+      idleMs: opts.idleMs,
+      attempts: opts.attempts || 3,
+      onBytes: (len) => {
+        received += len;
+        onProgress(total ? Math.min(1, received / total) : 0, received, total);
+      },
+    })));
+  } catch (e) {
+    controller.abort();
+    throw e;
+  } finally {
+    if (signal) signal.removeEventListener('abort', onOuterAbort);
+  }
+
+  // Join the segments into the .part file, then rename it into place.
+  await fsp.rm(part, { force: true }).catch(() => {});
+  const out = fs.createWriteStream(part);
+  try {
+    for (const s of segments) {
+      const rs = fs.createReadStream(s.file);
+      for await (const chunk of rs) {
+        if (!out.write(chunk)) await once(out, 'drain');
+      }
+    }
+    await new Promise((resolve, reject) => {
+      out.once('finish', resolve);
+      out.once('error', reject);
+      out.end();
+    });
+  } catch (e) {
+    try { out.destroy(); } catch (x) {}
+    await fsp.rm(part, { force: true }).catch(() => {});
+    throw e;
+  } finally {
+    await fsp.rm(partDir, { recursive: true, force: true }).catch(() => {});
+  }
+
+  const size = fs.statSync(part).size;
+  if (expectedSize && size !== expectedSize) {
+    await fsp.rm(part, { force: true }).catch(() => {});
+    throw new Error('incomplete download ' + size + '/' + expectedSize);
+  }
+  await fsp.rm(dest, { force: true });
+  await fsp.rename(part, dest);
+  return size;
+}
+
+async function downloadToFile(url, dest, opts = {}) {
+  const expectedSize = Number(opts.expectedSize || 0);
+  const connections = Math.max(1, Math.min(8, Number(opts.connections || 4)));
+  const threshold = Number(opts.segmentThreshold || 8 * 1024 * 1024);
+  if (connections > 1 && (!expectedSize || expectedSize >= threshold)) {
+    try {
+      return await downloadToFileSegmented(url, dest, Object.assign({}, opts, { connections }));
+    } catch (e) {
+      if (e && e.code === 'CANCELLED') throw e;
+      (opts.log || (() => {}))(`parallel download unavailable (${e.message}); using one connection`);
+      await fsp.rm(dest + '.parts', { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  return downloadToFileSingle(url, dest, opts);
 }
 
 async function sha256File(file) {
@@ -249,7 +460,7 @@ function assertInside(root, rel) {
 }
 
 function createAppStore(options) {
-  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {} } = options;
+  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {}, getDownloadMirror = () => '' } = options;
   // Data root holds the installed apps + libraries. Defaults to the Electron
   // userData dir for backward compatibility; the shell passes an explicit,
   // user-configurable dataRoot (e.g. %LOCALAPPDATA%\ShinyApps).
@@ -261,7 +472,10 @@ function createAppStore(options) {
   const sharedLib = path.join(dataRoot, 'lib');
   const privateRoot = path.join(dataRoot, 'private');
   const cacheDir = path.join(dataRoot, 'store-cache');
-  for (const d of [appsDir, sharedLib, privateRoot, cacheDir]) fs.mkdirSync(d, { recursive: true });
+  const catalogCachePath = path.join(dataRoot, 'catalog-cache.json');
+  const iconCacheDir = path.join(dataRoot, 'icons');
+  const iconIndexPath = path.join(iconCacheDir, 'index.json');
+  for (const d of [appsDir, sharedLib, privateRoot, cacheDir, iconCacheDir]) fs.mkdirSync(d, { recursive: true });
 
   let state = loadState();
   // Older or hand-edited state files may miss a section; every code path below
@@ -276,6 +490,15 @@ function createAppStore(options) {
   let catalogFetchedAt = 0;
   const CATALOG_TTL_MS = 60000;
   const running = new Map();
+  // Icon cache: catalog icons are remote; cache them so installed cards still
+  // show their logo offline. `iconDataCache` holds the base64 data URLs that
+  // the launcher receives when the catalog is unavailable.
+  let iconIndex = {};
+  try { iconIndex = JSON.parse(fs.readFileSync(iconIndexPath, 'utf8')) || {}; } catch (e) { iconIndex = {}; }
+  const iconDataCache = new Map();
+  let iconCacheRunning = false;
+  // Use the last catalog saved on disk until a fresh fetch succeeds.
+  loadCatalogCache();
 
   // Startup self-heal: forget installs and shared entries whose files no
   // longer exist.
@@ -342,6 +565,101 @@ function createAppStore(options) {
     return true;
   }
 
+  // ---- Catalog + icon cache ------------------------------------------------
+  // The catalog is small; keep the last successful copy on disk so an offline
+  // start still knows every installed app's metadata and can show icons.
+  function loadCatalogCache() {
+    try {
+      const cached = JSON.parse(fs.readFileSync(catalogCachePath, 'utf8'));
+      if (cached && cached.url === catalogUrl && cached.catalog && Array.isArray(cached.catalog.apps)) {
+        catalog = cached.catalog;
+        catalogFetchedAt = Number(cached.fetchedAt) || 0;
+        return true;
+      }
+    } catch (e) { /* no cache yet */ }
+    return false;
+  }
+
+  function saveCatalogCache() {
+    if (!catalog) return;
+    try {
+      const tmp = catalogCachePath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify({ url: catalogUrl, fetchedAt: catalogFetchedAt, catalog: catalog }));
+      fs.renameSync(tmp, catalogCachePath);
+    } catch (e) {
+      log('warn: could not cache the catalog:', e && e.message);
+    }
+  }
+
+  function iconDataUrl(id) {
+    const key = String(id);
+    if (iconDataCache.has(key)) return iconDataCache.get(key);
+    const entry = iconIndex[key];
+    if (!entry || !entry.file) { iconDataCache.set(key, ''); return ''; }
+    try {
+      const buf = fs.readFileSync(path.join(iconCacheDir, entry.file));
+      const mime = (entry.mime && entry.mime.indexOf('image/') === 0) ? entry.mime : 'image/png';
+      const url = 'data:' + mime + ';base64,' + buf.toString('base64');
+      iconDataCache.set(key, url);
+      return url;
+    } catch (e) {
+      iconDataCache.set(key, '');
+      return '';
+    }
+  }
+
+  function cacheCatalogIcons(cat) {
+    if (iconCacheRunning) return;
+    const todo = ((cat && cat.apps) || []).filter((a) => a && a.id && a.icon && /^https:\/\//i.test(a.icon));
+    if (!todo.length) return;
+    iconCacheRunning = true;
+    let next = 0;
+    const safe = (id) => String(id).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const worker = async () => {
+      while (next < todo.length) {
+        const a = todo[next++];
+        try {
+          const prev = iconIndex[a.id];
+          if (prev && prev.url === a.icon && prev.file &&
+              fs.existsSync(path.join(iconCacheDir, prev.file))) continue;
+          const res = await httpGet(a.icon);
+          if (res.statusCode !== 200) { res.destroy(); continue; }
+          const type = String(res.headers['content-type'] || '').toLowerCase();
+          if (type && type.indexOf('image/') !== 0) { res.destroy(); continue; }
+          const chunks = [];
+          let size = 0;
+          for await (const c of res) {
+            size += c.length;
+            if (size > 2 * 1024 * 1024) { chunks.length = 0; res.destroy(); break; }
+            chunks.push(c);
+          }
+          if (!chunks.length) continue;
+          const ext = type.indexOf('svg') !== -1 ? 'svg'
+            : (type.indexOf('jpeg') !== -1 || type.indexOf('jpg') !== -1) ? 'jpg' : 'png';
+          const file = safe(a.id) + '.' + ext;
+          const target = path.join(iconCacheDir, file);
+          const tmp = target + '.tmp';
+          fs.writeFileSync(tmp, Buffer.concat(chunks));
+          try { fs.rmSync(target, { force: true }); } catch (e) {}
+          fs.renameSync(tmp, target);
+          if (prev && prev.file && prev.file !== file) {
+            try { fs.rmSync(path.join(iconCacheDir, prev.file), { force: true }); } catch (e) {}
+          }
+          iconIndex[a.id] = { url: a.icon, file: file, mime: type || 'image/png' };
+          iconDataCache.delete(String(a.id));
+        } catch (e) {
+          log('warn: could not cache icon for ' + a.id + ': ' + e.message);
+        }
+      }
+    };
+    Promise.all([worker(), worker(), worker()])
+      .then(() => {
+        try { fs.writeFileSync(iconIndexPath, JSON.stringify(iconIndex, null, 2)); } catch (e) {}
+      })
+      .catch(() => {})
+      .finally(() => { iconCacheRunning = false; });
+  }
+
   async function fetchCatalog({ force = false } = {}) {
     const now = Date.now();
     if (catalog && !force && (now - catalogFetchedAt) < CATALOG_TTL_MS) return catalog;
@@ -351,6 +669,8 @@ function createAppStore(options) {
     log('fetch catalog ' + url);
     catalog = JSON.parse(await downloadToString(url));
     catalogFetchedAt = now;
+    saveCatalogCache();
+    cacheCatalogIcons(catalog);
     log('catalog apps: ' + catalog.apps.map((a) => a.id).join(', '));
     return catalog;
   }
@@ -362,6 +682,7 @@ function createAppStore(options) {
       catalogUrl = url;
       catalog = null;
       catalogFetchedAt = 0;
+      loadCatalogCache();
     }
   }
 
@@ -396,39 +717,60 @@ function createAppStore(options) {
       throw e;
     }
     try {
-      log(`install ${id}@${entry.version} ${plat}: GET ${art.url} (${art.size || '?'} bytes)`);
-      onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' });
-      await downloadToFile(art.url, zip, {
-        expectedSize: art.size || 0,
-        log,
-        signal,
-        onProgress: (frac, got, total) => onProgress({
-          phase: 'downloading',
-          percent: Math.round((frac || 0) * 100),
-          statusText: 'downloading ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
-        }),
-      });
-      log(`downloaded ${zip} (${fs.statSync(zip).size} bytes)`);
-      if (signal && signal.aborted) throw cancelError();
+      const sources = downloadUrls(art.url, getDownloadMirror());
+      let lastErr = null;
+      for (let i = 0; i < sources.length; i++) {
+        const source = sources[i];
+        try {
+          step = 'download';
+          if (signal && signal.aborted) throw cancelError();
+          const via = sources.length > 1 ? (i < sources.length - 1 ? ' (mirror)' : ' (GitHub)') : '';
+          log(`install ${id}@${entry.version} ${plat}: GET ${source} (${art.size || '?'} bytes)`);
+          onProgress({ phase: 'downloading', percent: 0, statusText: 'downloading' + via });
+          await fsp.rm(zip, { force: true }).catch(() => {});
+          await downloadToFile(source, zip, {
+            expectedSize: art.size || 0,
+            log,
+            signal,
+            onProgress: (frac, got, total) => onProgress({
+              phase: 'downloading',
+              percent: Math.round(Math.min(1, frac || 0) * 100),
+              statusText: 'downloading' + via + ' ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
+            }),
+          });
+          log(`downloaded ${zip} (${fs.statSync(zip).size} bytes)`);
+          if (signal && signal.aborted) throw cancelError();
 
-      // Verify against the catalog BEFORE touching anything on disk.
-      step = 'verify';
-      const gotSize = fs.statSync(zip).size;
-      onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying size' });
-      if (art.size && gotSize !== art.size) {
-        await fsp.rm(zip, { force: true });
-        const e = new Error(`size mismatch (catalog ${art.size} bytes, downloaded ${gotSize} bytes)`);
-        e.step = 'verify'; e.code = 'SIZE_MISMATCH';
-        throw e;
+          // Verify against the catalog BEFORE touching anything on disk.
+          step = 'verify';
+          const gotSize = fs.statSync(zip).size;
+          onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying size' });
+          if (art.size && gotSize !== art.size) {
+            const e = new Error(`size mismatch (catalog ${art.size} bytes, downloaded ${gotSize} bytes)`);
+            e.step = 'verify'; e.code = 'SIZE_MISMATCH';
+            throw e;
+          }
+          onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying checksum' });
+          const got = await sha256File(zip);
+          if (art.sha256 && got !== art.sha256) {
+            const e = new Error(`checksum mismatch (catalog ${String(art.sha256).slice(0, 12)}\u2026, downloaded ${got.slice(0, 12)}\u2026)`);
+            e.step = 'verify'; e.code = 'CHECKSUM_MISMATCH';
+            throw e;
+          }
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          await fsp.rm(zip, { force: true }).catch(() => {});
+          if (signal && signal.aborted) throw e;
+          if (i < sources.length - 1) {
+            log(`download source failed (${source}): ${e.message}; trying the next source`);
+            continue;
+          }
+          throw e;
+        }
       }
-      onProgress({ phase: 'verifying', percent: 100, statusText: 'verifying checksum' });
-      const got = await sha256File(zip);
-      if (art.sha256 && got !== art.sha256) {
-        await fsp.rm(zip, { force: true });
-        const e = new Error(`checksum mismatch (catalog ${String(art.sha256).slice(0, 12)}\u2026, downloaded ${got.slice(0, 12)}\u2026)`);
-        e.step = 'verify'; e.code = 'CHECKSUM_MISMATCH';
-        throw e;
-      }
+      if (lastErr) throw lastErr;
 
       step = 'install';
       onProgress({ phase: 'unpacking', percent: 0, statusText: 'unpacking' });
@@ -550,6 +892,10 @@ function createAppStore(options) {
         version: manifest.version, platform: plat, dir: finalDir,
         packages: (manifest.packages || []).map((p) => p.name),
         source: 'local',
+        // Keep where a sideloaded app came from, so the launcher can offer
+        // "Copy download link" (a URL install) or "Copy bundle path" later.
+        sourceUrl: opts.sourceUrl || undefined,
+        sourcePath: opts.sourceUrl ? undefined : (opts.sourcePath || zipPath),
         sha256: sha,
         meta: bundleMeta(manifest),
       };
@@ -597,7 +943,7 @@ function createAppStore(options) {
           statusText: 'downloading ' + Math.round(got / 1048576) + (total ? ' / ' + Math.round(total / 1048576) : '') + ' MB',
         }),
       });
-      return await installFromFile(tmp, opts);
+      return await installFromFile(tmp, Object.assign({}, opts, { sourceUrl: url }));
     } finally {
       await fsp.rm(tmp, { force: true }).catch(() => {});
     }
@@ -925,7 +1271,7 @@ function createAppStore(options) {
     report(0, 0, 'Stopping running apps\u2026');
     await stopAll();
     const appIds = Object.keys(state.apps || {});
-    const total = appIds.length + 3;   // per-app dirs + shared/private/cache sweeps
+    const total = appIds.length + 5;   // per-app dirs + 4 sweeps + catalog cache
     let done = 0;
     for (const id of appIds) {
       report(done, total, 'Removing ' + id + '\u2026');
@@ -936,12 +1282,18 @@ function createAppStore(options) {
     // Sweep anything still under apps/ (staging/incoming), then recreate the dirs.
     try { await fsp.rm(appsDir, { recursive: true, force: true }); } catch (e) {}
     try { fs.mkdirSync(appsDir, { recursive: true }); } catch (e) {}
-    for (const d of [sharedLib, privateRoot, cacheDir]) {
+    for (const d of [sharedLib, privateRoot, cacheDir, iconCacheDir]) {
       report(done, total, 'Clearing data\u2026');
       try { await fsp.rm(d, { recursive: true, force: true }); } catch (e) {}
       try { fs.mkdirSync(d, { recursive: true }); } catch (e) {}
       done++;
     }
+    try { await fsp.rm(catalogCachePath, { force: true }); } catch (e) {}
+    done++;
+    catalog = null;
+    catalogFetchedAt = 0;
+    iconIndex = {};
+    iconDataCache.clear();
     state = { schema: 1, apps: {}, shared: {} };
     saveState();
     report(total, total, 'Done');
@@ -956,10 +1308,11 @@ function createAppStore(options) {
     forget,
     getState: () => state,
     getCatalog: () => catalog,
+    iconDataUrl,
     setCatalogUrl, installFromUrl,
     usage, cleanup, resetLocal,
     getDiskFree: () => freeBytes(appsDir),
   };
 }
 
-module.exports = { createAppStore, cmpVersion, platformKey };
+module.exports = { createAppStore, cmpVersion, platformKey, downloadUrls };

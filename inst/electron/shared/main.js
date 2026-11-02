@@ -17,7 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const fsp = fs.promises;
 const backend = require('./backends/{{backend_module}}');
-const { createAppStore, cmpVersion, platformKey } = require('./backends/appstore');
+const { createAppStore, cmpVersion, platformKey, downloadUrls } = require('./backends/appstore');
 
 // File logging -- writes to configured log directory or app userData
 const LOG_LEVEL = '{{{log_level_js}}}';
@@ -225,6 +225,29 @@ function fmtBytes(bytes) {
   return mb.toFixed(1) + ' MB';
 }
 function shellDisplayName() { return '{{{app_name_js}}}'; }
+function platformLabelFor(p) {
+  switch (p) {
+    case 'win-x64': return 'Windows x64';
+    case 'win-arm64': return 'Windows arm64';
+    case 'mac-arm64': return 'macOS arm64';
+    case 'mac-x64': return 'macOS Intel';
+    case 'linux-x64': return 'Linux x64';
+    default: return p || 'this platform';
+  }
+}
+// Bound a request so an offline/blocked network cannot keep the launcher on a
+// skeleton screen for the socket timeout. The request may finish later; its
+// result is cached by the caller for the next refresh.
+function withTimeout(promise, ms) {
+  let timer = null;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out after ' + ms + ' ms')), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 function closeAllLogs() {
   try { if (logStream) { logStream.end(); logStream = null; } } catch (e) {}
   closeAppLog();
@@ -246,7 +269,7 @@ async function wipeAllLocalData(onProgress) {
   closeAllLogs();
   const userData = app.getPath('userData');
   const dataRoot = resolveDataRoot();
-  const storeItems = ['apps', 'lib', 'private', 'store-cache', 'state.json', 'root.json'];
+  const storeItems = ['apps', 'lib', 'private', 'store-cache', 'icons', 'catalog-cache.json', 'state.json', 'root.json'];
   const targets = [];
   const addTarget = function (p) {
     try {
@@ -254,7 +277,7 @@ async function wipeAllLocalData(onProgress) {
       if (!targets.some(function (t) { return path.resolve(t) === r; })) targets.push(p);
     } catch (e) { /* skip unusable path */ }
   };
-  for (const t of ['apps', 'lib', 'private', 'store-cache', 'state.json', 'root.json', 'settings.json', 'logs', 'crashes', 'window-state.json']) {
+  for (const t of ['apps', 'lib', 'private', 'store-cache', 'icons', 'catalog-cache.json', 'state.json', 'root.json', 'settings.json', 'logs', 'crashes', 'window-state.json']) {
     addTarget(path.join(userData, t));
   }
   if (path.resolve(dataRoot) !== path.resolve(userData)) {
@@ -1207,6 +1230,7 @@ function toggleMetricsOverlay() {
 function buildSettingsSubmenu() {
   var sub = [];
   sub.push({ label: 'Catalog\u2026', click: function () { storeCommand({ cmd: 'catalog' }); } });
+  sub.push({ label: 'Download Mirror\u2026', click: function () { storeCommand({ cmd: 'mirror' }); } });
   sub.push({ label: 'App Data Location\u2026', click: function () { storeCommand({ cmd: 'data_root' }); } });
   sub.push({ label: 'Storage\u2026', click: function () { storeCommand({ cmd: 'storage' }); } });
   sub.push({ type: 'separator' });
@@ -2047,16 +2071,21 @@ function createWindow() {
       startBackend: storeStartBackend,
       shellVersion: '{{{app_version_js}}}',
       shellRVersion: SHELL_R_VERSION,
+      getDownloadMirror: function () { return appSettings.downloadMirror || ''; },
       log: function (m) { log('info', '[store]', m); }
     });
     ipcMain.handle('store-list', async () => {
       // Force a fresh catalog so a newly registered app appears without restarting.
       let cat;
+      let offline = false;
       try {
-        cat = await appStore.fetchCatalog({ force: true });
+        const fetching = appStore.fetchCatalog({ force: true });
+        fetching.catch(() => { /* handled below or after the timeout */ });
+        cat = await withTimeout(fetching, 5000);
       } catch (e) {
-        // Offline / catalog outage: fall back to the cached catalog (or none)
-        // so installed and sideloaded apps stay visible and runnable.
+        // Offline / catalog outage: fall back to the on-disk cached catalog (or
+        // none) so installed and sideloaded apps stay visible and runnable.
+        offline = true;
         log('warn', 'catalog fetch failed; using cached/installed data:', e && e.message);
         cat = appStore.getCatalog() || { apps: [] };
       }
@@ -2065,6 +2094,8 @@ function createWindow() {
       refreshMenuIfChanged();   // keep the Apps menu (update count / Quick Run) fresh
       {{/menu_enabled}}
       const plat = platformKey();
+      const platLabel = platformLabelFor(plat);
+      const mirrorOn = !!appSettings.downloadMirror;
       const list = cat.apps.map((a) => {
         // Trust the filesystem, not just state.json: an install whose folder is
         // gone must show as "not installed" instead of an unlaunchable card.
@@ -2076,8 +2107,18 @@ function createWindow() {
           (SHELL_R_VERSION && a.r_version && cmpVersion(SHELL_R_VERSION, a.r_version) < 0) ||
           (a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0)
         );
+        // A URL-installed app keeps its original source link; catalog apps use
+        // the artifact for this platform.
+        const sourceUrl = (ins && ins.sourceUrl) || '';
+        const hasCatalogLink = !!(art && art.url);
+        const downloadLinkKind = sourceUrl ? 'source' : (hasCatalogLink ? 'catalog' : '');
         return {
-          id: a.id, name: a.name, description: a.description, icon: a.icon, author: a.author || '',
+          id: a.id, name: a.name, description: a.description,
+          // Installed apps use the cached icon (data URL) when available, so
+          // their cards render without a network request. Other catalog cards
+          // use the remote icon.
+          icon: (ins && appStore.iconDataUrl(a.id)) || a.icon || '',
+          author: a.author || '',
           homepage: a.homepage || a.homepage_url || a.url || '',
           catalogVersion: a.version,
           installed: !!ins, installedVersion: ins ? ins.version : null,
@@ -2090,6 +2131,10 @@ function createWindow() {
           rVersion: a.r_version || '',
           minShellVersion: a.min_shell_version || '',
           incompatible: incompatible,
+          hasDownloadLink: !!downloadLinkKind,
+          hasMirrorLink: downloadLinkKind === 'catalog' && mirrorOn,
+          downloadLinkKind: downloadLinkKind,
+          downloadPlatformLabel: downloadLinkKind === 'catalog' ? platLabel : '',
           state: ins ? 'installed' : 'not-installed'
         };
       });
@@ -2100,8 +2145,13 @@ function createWindow() {
         if (catIds[id] || !appStore.isInstalled(id)) return;
         const lins = st.apps[id];
         const lm = (lins && lins.meta) || {};
+        const sourceUrl = (lins && lins.sourceUrl) || '';
         list.push({
-          id: id, name: lm.name || id, description: lm.description || '', icon: '', author: lm.author || '',
+          id: id, name: lm.name || id, description: lm.description || '',
+          // Sideloaded apps have no catalog icon; use one cached earlier if the
+          // app was previously listed (or installed from the catalog).
+          icon: (appStore.iconDataUrl(id) || ''),
+          author: lm.author || '',
           homepage: lm.homepage || '',
           catalogVersion: (lins && lins.version) || null,
           installed: true, installedVersion: (lins && lins.version) || null,
@@ -2110,13 +2160,55 @@ function createWindow() {
           tags: [], available: true, size: 0,
           license: lm.license || '', rVersion: lm.rVersion || '',
           minShellVersion: '', incompatible: false,
+          hasDownloadLink: !!sourceUrl,
+          hasMirrorLink: false,
+          downloadLinkKind: sourceUrl ? 'source' : '',
+          downloadPlatformLabel: '',
           local: !!(lins && lins.source === 'local'),
           state: 'installed'
         });
       });
-      return list;
+      return { apps: list, offline: offline };
     });
   }
+
+  ipcMain.handle('copy-download-link', async (_event, appId, mirror) => {
+    try {
+      if (!appId) return { ok: false, error: 'No app selected' };
+      const { clipboard } = require('electron');
+      const st = appStore && appStore.getState ? appStore.getState() : null;
+      const ins = (st && st.apps) ? st.apps[appId] : null;
+      let url = '';
+      let kind = '';
+      if (ins && ins.sourceUrl) {
+        // A URL-installed app keeps the exact source the user chose.
+        if (mirror) return { ok: false, error: 'This app was installed from a URL; use Copy download link' };
+        url = ins.sourceUrl;
+        kind = 'source';
+      } else {
+        let entry = appStore ? appStore.catalogEntry(appId) : null;
+        if (!entry && appStore) {
+          try { await appStore.fetchCatalog(); entry = appStore.catalogEntry(appId); } catch (e) { /* offline */ }
+        }
+        const art = entry && entry.artifacts && entry.artifacts[platformKey()];
+        if (!art || !art.url) return { ok: false, error: 'No bundle is published for this platform' };
+        if (mirror) {
+          if (!appSettings.downloadMirror) return { ok: false, error: 'No download mirror is configured' };
+          const urls = downloadUrls(art.url, appSettings.downloadMirror);
+          if (urls.length < 2) return { ok: false, error: 'The mirror does not produce a different URL' };
+          url = urls[0];
+          kind = 'mirror';
+        } else {
+          url = art.url;
+          kind = 'catalog';
+        }
+      }
+      clipboard.writeText(url);
+      return { ok: true, url: url, kind: kind };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  });
 
   ipcMain.handle('copy-diagnostics', async (_event, appId) => {
     try {
@@ -2203,6 +2295,7 @@ function createWindow() {
   ipcMain.handle('get-settings', async () => ({
     catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL,
     defaultCatalogUrl: DEFAULT_CATALOG_URL,
+    downloadMirror: appSettings.downloadMirror || '',
     crashReporting: !!appSettings.crashReporting,
     dataRoot: resolveDataRoot(),
     defaultDataRoot: DEFAULT_DATA_ROOT,
@@ -2215,6 +2308,22 @@ function createWindow() {
     saveSettings();
     if (appStore) appStore.setCatalogUrl(appSettings.catalogUrl || DEFAULT_CATALOG_URL);
     return { ok: true, catalogUrl: appSettings.catalogUrl || DEFAULT_CATALOG_URL };
+  });
+
+  ipcMain.handle('set-download-mirror', async (_event, value) => {
+    const v = String(value || '').trim();
+    let valid = '';
+    if (v) {
+      if (/\s/.test(v)) return { ok: false, error: 'The mirror URL cannot contain spaces' };
+      const test = v.includes('{url}') ? v.split('{url}').join(DEFAULT_CATALOG_URL) : v;
+      let u;
+      try { u = new URL(test); } catch (e) { return { ok: false, error: 'Enter a valid https:// URL (optionally with {url})' }; }
+      if (u.protocol !== 'https:') return { ok: false, error: 'The mirror must use https://' };
+      valid = v;
+    }
+    if (valid) appSettings.downloadMirror = valid; else delete appSettings.downloadMirror;
+    saveSettings();
+    return { ok: true, downloadMirror: valid };
   });
 
   ipcMain.handle('set-crash-reporting', async (_event, on) => {

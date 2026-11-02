@@ -275,6 +275,7 @@
     var layout = 'card';      // 'card' | 'list'
     var loading = false;
     var loadError = '';
+    var offline = false;
     var diskFree = null;
     try {
       var savedLayout = localStorage.getItem('shinyapps.layout');
@@ -677,12 +678,25 @@
       b.textContent = '\u2026';
       b.title = 'More actions';
       b.setAttribute('aria-label', 'More actions');
-      b.disabled = app.state === 'installing' || anyInstalling();
+      // Copy/visit actions are harmless during another install; only an
+      // installed app's menu (which can Uninstall) is frozen while storeBusy.
+      b.disabled = app.state === 'installing' || (app.installed && anyInstalling());
       b.addEventListener('click', function (ev) {
         ev.stopPropagation();
         openPopmenu(b, overflowItems(app));
       });
       return b;
+    }
+
+    function copyDownloadLink(appId, mirror) {
+      if (!window.lifecycle || !window.lifecycle.copyDownloadLink) {
+        showToast('Could not copy the download link', 'error');
+        return;
+      }
+      window.lifecycle.copyDownloadLink(appId, !!mirror).then(function (r) {
+        if (r && r.ok) showToast(mirror ? 'Mirror link copied' : 'Download link copied', 'success');
+        else showToast((r && r.error) || 'Could not copy the download link', 'error');
+      }).catch(function () { showToast('Could not copy the download link', 'error'); });
     }
 
     function overflowItems(app) {
@@ -693,23 +707,34 @@
           onClick: function () { if (window.lifecycle.openExternal) window.lifecycle.openExternal(app.homepage); }
         });
       }
-      items.push({ label: 'Open app folder', onClick: function () {
-        if (window.lifecycle && window.lifecycle.openAppFolder) {
-          window.lifecycle.openAppFolder(app.id).then(function (ok) {
-            if (!ok) showToast('Could not open the app folder', 'error');
-          }).catch(function () { showToast('Could not open the app folder', 'error'); });
+      if (app.hasDownloadLink) {
+        var label = app.downloadLinkKind === 'source'
+          ? 'Copy download link'
+          : 'Copy download link (' + (app.downloadPlatformLabel || 'this platform') + ')';
+        items.push({ label: label, onClick: function () { copyDownloadLink(app.id, false); } });
+        if (app.hasMirrorLink) {
+          items.push({ label: 'Copy mirror link', onClick: function () { copyDownloadLink(app.id, true); } });
         }
-      } });
-      items.push({ label: 'View log', onClick: function () { if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog(app.id); } });
-      items.push({ label: 'Copy diagnostics', onClick: function () {
-        if (window.lifecycle && window.lifecycle.copyDiagnostics) {
-          window.lifecycle.copyDiagnostics(app.id).then(function (ok) {
-            showToast(ok ? 'Diagnostics copied to clipboard' : 'Could not copy diagnostics', ok ? 'success' : 'error');
-          }).catch(function () { showToast('Could not copy diagnostics', 'error'); });
-        }
-      } });
-      items.push({ separator: true });
-      items.push({ label: 'Uninstall', danger: true, onClick: function () { confirmUninstall(app); } });
+      }
+      if (app.installed) {
+        items.push({ label: 'Open app folder', onClick: function () {
+          if (window.lifecycle && window.lifecycle.openAppFolder) {
+            window.lifecycle.openAppFolder(app.id).then(function (ok) {
+              if (!ok) showToast('Could not open the app folder', 'error');
+            }).catch(function () { showToast('Could not open the app folder', 'error'); });
+          }
+        } });
+        items.push({ label: 'View log', onClick: function () { if (window.lifecycle && window.lifecycle.openAppLog) window.lifecycle.openAppLog(app.id); } });
+        items.push({ label: 'Copy diagnostics', onClick: function () {
+          if (window.lifecycle && window.lifecycle.copyDiagnostics) {
+            window.lifecycle.copyDiagnostics(app.id).then(function (ok) {
+              showToast(ok ? 'Diagnostics copied to clipboard' : 'Could not copy diagnostics', ok ? 'success' : 'error');
+            }).catch(function () { showToast('Could not copy diagnostics', 'error'); });
+          }
+        } });
+        items.push({ separator: true });
+        items.push({ label: 'Uninstall', danger: true, onClick: function () { confirmUninstall(app); } });
+      }
       return items;
     }
 
@@ -731,12 +756,17 @@
               onConfirm: go
             });
           } else { go(); }
-        }, lock || app.state === 'installing' || !!reason);
+        }, lock || app.state === 'installing' || !!reason || offline);
         if (reason) {
           installBtn.disabled = true;
           installBtn.title = reason;
+        } else if (offline) {
+          installBtn.title = 'An internet connection is required to install';
         }
         actions.appendChild(installBtn);
+        // Not installed, but there may still be a bundle link to copy (or a
+        // homepage to visit).
+        if (app.hasDownloadLink || app.homepage) actions.appendChild(makeOverflowButton(app));
       } else if (app.running) {
         actions.appendChild(makeButton('Open', 'primary', function () {
           markRecent(app.id);
@@ -752,9 +782,11 @@
           window.lifecycle.runApp(app.id);
         }, lock || app.state === 'installing'));
         if (app.updateAvailable) {
-          actions.appendChild(makeButton('Update', '', function () {
+          var updateBtn = makeButton('Update', '', function () {
             window.lifecycle.updateApp(app.id);
-          }, lock || app.state === 'installing'));
+          }, lock || app.state === 'installing' || offline);
+          if (offline) updateBtn.title = 'An internet connection is required to update';
+          actions.appendChild(updateBtn);
         }
         actions.appendChild(makeOverflowButton(app));
       }
@@ -841,9 +873,12 @@
       var empty = document.getElementById('empty-state');
       empty.innerHTML = '';
       var banner = document.getElementById('banner');
-      banner.hidden = !(loadError && model.length > 0);
+      banner.hidden = !(offline || (loadError && model.length > 0));
       banner.textContent = '';
-      if (!banner.hidden) {
+      if (offline) {
+        banner.textContent = 'Offline \u2014 showing installed apps. Install and update are unavailable. ';
+        banner.appendChild(makeButton('Retry', '', function () { refresh(); }));
+      } else if (!banner.hidden) {
         banner.textContent = 'Could not refresh the catalog \u2014 showing the last known list. ';
         banner.appendChild(makeButton('Retry', '', function () { refresh(); }));
       }
@@ -1203,6 +1238,28 @@
       });
     }
 
+    async function openMirrorDialog() {
+      var s = null;
+      try { s = await window.lifecycle.getSettings(); } catch (e) {}
+      openPromptDialog({
+        title: 'Download Mirror',
+        message: 'Optional. A mirror is tried before GitHub when installing apps. Use {url} for the original link, e.g. https://gh-proxy.com/{url}; leave empty to download from GitHub. Downloads are still verified by size and SHA-256.',
+        value: (s && s.downloadMirror) || '',
+        placeholder: 'https://gh-proxy.com/{url}',
+        confirmLabel: 'Save',
+        onConfirm: async function (val, errEl) {
+          var r = null;
+          try { r = await window.lifecycle.setDownloadMirror(val); } catch (e) {}
+          if (r && r.ok) {
+            showToast(val ? 'Download mirror saved' : 'Using GitHub directly', 'success');
+            return true;
+          }
+          errEl.textContent = (r && r.error) || 'Could not save the download mirror';
+          return false;
+        }
+      });
+    }
+
     function openInstallUrlDialog() {
       openPromptDialog({
         title: 'Install from URL',
@@ -1376,7 +1433,15 @@
       loadError = '';
       render();
       try {
-        model = await window.lifecycle.listApps();
+        var res = await window.lifecycle.listApps();
+        if (Array.isArray(res)) {
+          model = res;
+          offline = false;
+        } else {
+          model = (res && res.apps) || [];
+          offline = !!(res && res.offline);
+        }
+        if (!Array.isArray(model)) model = [];
         byId = {};
         model.forEach(function (a) { byId[a.id] = a; });
         try { diskFree = await window.lifecycle.getDiskFree(); } catch (e) { diskFree = null; }
@@ -1403,6 +1468,8 @@
           openInstallUrlDialog();
         } else if (cmd.cmd === 'catalog') {
           openCatalogDialog();
+        } else if (cmd.cmd === 'mirror') {
+          openMirrorDialog();
         } else if (cmd.cmd === 'storage') {
           openStorageDialog();
         } else if (cmd.cmd === 'data_root') {
@@ -1505,6 +1572,9 @@
         if ((ev.state === 'done' && ev.op) || ev.state === 'error') refresh();
       });
     }
+
+    // Retry automatically when the connection returns.
+    window.addEventListener('online', function () { refresh(); });
 
     refresh();
   </script>

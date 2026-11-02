@@ -71,6 +71,21 @@
   independently of `app.name`; leave it unset to keep the app name. The
   launcher no longer shows "Your installed applications" under the heading.
 
+* Settings > Download Mirror… lets a faster HTTPS mirror serve app bundles.
+  Use `{url}` for the original GitHub link (for example
+  `https://gh-proxy.com/{url}`); the mirror is tried first and GitHub is the
+  fallback. Every bundle is still verified against the catalog's size and
+  SHA-256, so a mirror cannot change what gets installed. Bundle downloads
+  also use four parallel HTTP range requests when the server supports them,
+  with the previous single-stream resume path as fallback; this is several
+  times faster on high-latency links.
+
+* Catalog cards, installed or not, now offer Copy download link with the
+  bundle URL for the current platform; when a download mirror is configured
+  they also offer Copy mirror link. Apps installed from a URL keep that source
+  URL and offer the same action. Users can copy the link, download the bundle
+  themselves, and install it with Install from bundle.
+
 * `installer.allow_to_change_installation_directory: true` adds a page to the
   Windows setup wizard where users choose the installation folder. It requires
   `installer.one_click: false`; otherwise reading the configuration fails with
@@ -116,6 +131,15 @@
   configuration it replaces gave a different slug.
 
 ## Minor improvements and fixes
+
+* The catalog is cached on disk and catalog icons are cached locally. Starting
+  without a network now shows installed apps — catalog-installed, URL-installed
+  and local bundles alike — with their names, descriptions and logos, after at
+  most a five-second catalog timeout instead of the socket timeout. The launcher
+  shows an offline banner and disables catalog install/update until the
+  connection returns; Install from bundle still works offline. Installed cards
+  use the cached icon even when online, so their logos no longer depend on the
+  icon CDN.
 
 * The CPU/RAM title no longer sticks after returning to the launcher. A
   process-table read that finished after the app page was gone could write the
