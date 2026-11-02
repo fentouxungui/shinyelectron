@@ -1188,7 +1188,10 @@ function buildAppsSubmenu() {
     sub.push({ label: 'Install from Bundle\u2026', click: function () { storeCommand({ cmd: 'install_bundle' }); } });
     sub.push({ label: 'Install from URL\u2026', click: function () { storeCommand({ cmd: 'install_url' }); } });
     sub.push({ type: 'separator' });
-    sub.push({ label: 'Refresh Catalog', click: function () { storeCommand({ cmd: 'refresh' }); } });
+    sub.push({ label: 'Refresh Catalog', click: function () {
+      log('info', '[store] manual catalog refresh requested');
+      storeCommand({ cmd: 'refresh' });
+    } });
   } else {
     sub.push({
       label: 'Back to Launcher',

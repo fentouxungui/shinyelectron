@@ -132,6 +132,10 @@
 
 ## Minor improvements and fixes
 
+* Apps > Refresh Catalog now shows a "Refreshing catalog…" toast and a result
+  ("Catalog refreshed", or an offline/failure message) instead of silently
+  reloading the same list. The shell log records the manual request.
+
 * The catalog is cached on disk and catalog icons are cached locally. Starting
   without a network now shows installed apps — catalog-installed, URL-installed
   and local bundles alike — with their names, descriptions and logos, after at

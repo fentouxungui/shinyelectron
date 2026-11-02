@@ -1427,10 +1427,11 @@
       }
     });
 
-    async function refresh() {
+    async function refresh(showFeedback) {
       if (!window.lifecycle || !window.lifecycle.listApps) { loading = false; render(); return; }
       loading = true;
       loadError = '';
+      if (showFeedback) showToast('Refreshing catalog…');
       render();
       try {
         var res = await window.lifecycle.listApps();
@@ -1448,11 +1449,18 @@
       } catch (e) {
         loadError = (e && e.message) || String(e) || 'unknown error';
         if (!Array.isArray(model)) model = [];
+        if (showFeedback) showToast('Catalog refresh failed: ' + loadError, 'error');
       } finally {
         loading = false;
         rebuildTagFilter();
         render();
         pushQuickRunOrder();
+        if (showFeedback && !loadError) {
+          showToast(
+            offline ? 'Catalog unavailable — showing cached apps' : 'Catalog refreshed',
+            offline ? 'error' : 'success'
+          );
+        }
       }
     }
 
@@ -1477,7 +1485,7 @@
         } else if (cmd.cmd === 'set_theme') {
           setTheme(cmd.theme === 'light' || cmd.theme === 'dark' ? cmd.theme : 'system');
         } else if (cmd.cmd === 'refresh') {
-          refresh();
+          refresh(true);
         } else if (cmd.cmd === 'usage_progress') {
           updateUsageProgress(cmd.done, cmd.total, cmd.label);
         } else if (cmd.cmd === 'busy_begin') {
