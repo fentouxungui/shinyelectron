@@ -385,6 +385,8 @@
       if (op === 'update_app') return 'update';
       if (op === 'uninstall_app') return 'uninstall';
       if (op === 'install_app') return 'install';
+      if (op === 'run_app') return 'start';
+      if (op === 'stop_app') return 'stop';
       return 'complete';
     }
 
@@ -1530,10 +1532,30 @@
           bundleBusy = false;
           bundleStatus = '';
           bundlePercent = 0;
-          render();
-          if (ev.state === 'error') showToast(ev.message || ('Bundle install failed' + (ev.error ? ': ' + ev.error : '')), 'error');
-          else if (ev.state === 'cancelled') showToast('Bundle install cancelled');
-          else showToast(ev.message || 'Bundle installed', 'success');
+          if (ev.state === 'error') {
+            render();
+            showToast(ev.message || ('Bundle install failed' + (ev.error ? ': ' + ev.error : '')), 'error');
+          } else if (ev.state === 'cancelled') {
+            render();
+            showToast('Bundle install cancelled');
+          } else {
+            // A manual bundle install of the same app supersedes any error
+            // left on its card by an earlier failed catalog install. Update
+            // the card before rendering and refreshing, so the error is gone
+            // even if the catalog refresh happens to fail.
+            if (ev.appId) {
+              delete errors[ev.appId];
+              var bapp = byId[ev.appId];
+              if (bapp) {
+                bapp.installed = true;
+                bapp.state = 'installed';
+                if (ev.installedVersion) bapp.installedVersion = ev.installedVersion;
+                bapp.updateAvailable = false;
+              }
+            }
+            render();
+            showToast(ev.message || 'Bundle installed', 'success');
+          }
           refresh();
           return;
         }
@@ -1560,6 +1582,8 @@
               app.installed = true;
               if (app.catalogVersion) app.installedVersion = app.catalogVersion;
               app.updateAvailable = false;
+            } else if (ev.op === 'stop_app') {
+              app.running = false;
             }
             app.state = 'installed';
             app.percent = 0;

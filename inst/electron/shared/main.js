@@ -876,6 +876,7 @@ async function runStoreApp(appId) {
     return;
   }
   lastSelectedAppId = appId;
+  var runError = null;
   try { await appStore.fetchCatalog(); } catch (e) { /* entry may already be cached */ }
   currentAppMeta = appMetaFor(appId);
   {{#menu_enabled}}
@@ -899,29 +900,35 @@ async function runStoreApp(appId) {
       }
     } catch (e) {
       log('error', 'run_app failed:', e && e.message);
+      runError = e;
     }
   } else {
     try { await appStore.run(appId); }
     catch (e) {
       log('error', 'run_app failed:', e && e.message);
-      // The launcher is still on screen when run() rejects before starting a
-      // backend (missing install/packages): drop the app context set above so
-      // Help/About and the menu describe the shell again.
-      if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES')) {
-        currentAppMeta = null;
-        lastSelectedAppId = null;
-        {{#menu_enabled}}
-        createMenu();
-        {{/menu_enabled}}
-      }
-      // A missing install or missing packages leave the launcher card in a
-      // state the user can act on, instead of failing silently on every click.
-      if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES') && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('store-status', { id: appId, state: 'error', error: e.message });
-      }
+      runError = e;
+      // The launch failed (missing install/packages, or a backend that could
+      // not start), so no app page is open: drop the app context set above and
+      // let Help/About and the menu describe the shell again.
+      currentAppMeta = null;
+      lastSelectedAppId = null;
+      {{#menu_enabled}}
+      createMenu();
+      {{/menu_enabled}}
     }
   }
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: appId, state: 'done' });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (runError) {
+      mainWindow.webContents.send('store-status', {
+        id: appId, state: 'error', op: 'run_app',
+        error: (runError && runError.message) || String(runError)
+      });
+    } else {
+      // Only a successful launch reports "done": reporting it after a failure
+      // would immediately clear the error the card is meant to show.
+      mainWindow.webContents.send('store-status', { id: appId, state: 'done' });
+    }
+  }
 }
 
 // Stop the persistent shinylive server. Called ONLY at quit; the launcher
@@ -2849,9 +2856,17 @@ function createWindow() {
           lastProgPhase = pp.phase;
           sendBundle({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
         };
-        if (bundleUrl) await appStore.installFromUrl(bundleUrl, { onProgress: onProg, confirm: confirmBundle });
-        else await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
-        sendBundle({ state: 'done', op: 'install_bundle' });
+        let installed = null;
+        if (bundleUrl) installed = await appStore.installFromUrl(bundleUrl, { onProgress: onProg, confirm: confirmBundle });
+        else installed = await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
+        // Include the installed app id so the launcher can drop a stale error
+        // left by an earlier failed catalog install of the same app.
+        sendBundle({
+          state: 'done',
+          op: 'install_bundle',
+          appId: (installed && installed.id) || '',
+          installedVersion: (installed && installed.version) || '',
+        });
       } catch (e) {
         if (!(e && e.cancelled)) sendBundle({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
         // Say so explicitly: 'done' made the launcher report "Bundle installed".
@@ -2893,8 +2908,20 @@ function createWindow() {
 
     } else if (actionType === 'stop_app') {
       if (!appStore) return;
-      try { await appStore.stop(action.appId); } catch (e) { log('error', 'stop_app failed:', e && e.message); }
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', { id: action.appId, state: 'done' });
+      try {
+        await appStore.stop(action.appId);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('store-status', { id: action.appId, state: 'done', op: 'stop_app' });
+        }
+      } catch (e) {
+        log('error', 'stop_app failed:', e && e.message);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('store-status', {
+            id: action.appId, state: 'error', op: 'stop_app',
+            error: (e && e.message) || String(e)
+          });
+        }
+      }
     }
     } catch (err) {
       log('error', 'IPC action failed:', err && err.message ? err.message : err);

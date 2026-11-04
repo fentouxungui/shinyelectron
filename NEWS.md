@@ -136,6 +136,14 @@
   ("Catalog refreshed", or an offline/failure message) instead of silently
   reloading the same list. The shell log records the manual request.
 
+* A successful Install from Bundle now clears a red "Failed to install" line
+  left on the same app's card by an earlier failed catalog install, instead of
+  leaving it there until the app is run. A failed launch also no longer reports
+  "done" immediately after its error, so launch errors stay visible.
+
+* Stopping an app now updates its card immediately, and a failed stop shows an
+  error on the card, instead of leaving it marked Running until another refresh.
+
 * The catalog is cached on disk and catalog icons are cached locally. Starting
   without a network now shows installed apps — catalog-installed, URL-installed
   and local bundles alike — with their names, descriptions and logos, after at
