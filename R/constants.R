@@ -224,6 +224,8 @@ SHINYELECTRON_DEFAULTS <- list(
     license_file = NULL,
     one_click = TRUE,
     allow_to_change_installation_directory = NULL,
-    per_machine = NULL
+    per_machine = NULL,
+    # Old shortcut basenames to remove after a product-name change.
+    legacy_shortcut_names = NULL
   )
 )

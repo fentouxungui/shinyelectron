@@ -201,7 +201,7 @@ generate_package_json <- function(app_slug, app_version, backend, config,
     mac_config$identity <- "-"
   }
 
-  nsis_config <- build_nsis_config(config)
+  nsis_config <- build_nsis_config(config, app_name)
   if (length(nsis_config) > 0) {
     build_config$nsis <- nsis_config
   }
@@ -230,10 +230,12 @@ generate_package_json <- function(app_slug, app_version, backend, config,
 #' that [copy_installer_license()] places in the generated project.
 #'
 #' @param config List. The effective configuration.
-#' @return A named list for the package.json `build.nsis` field, empty when
-#'   no installer option is set.
+#' @param app_name Character display name used for the shortcut label.
+#' @return A named list for the package.json `build.nsis` field. It always
+#'   includes the shortcut recreation policy, plus any configured installer
+#'   options.
 #' @keywords internal
-build_nsis_config <- function(config) {
+build_nsis_config <- function(config, app_name = NULL) {
   installer <- config$installer
   nsis <- list()
   if (!is.null(installer$one_click)) {
@@ -248,6 +250,18 @@ build_nsis_config <- function(config) {
   }
   if (!is.null(installer$license_file)) {
     nsis$license <- installer_license_path(installer$license_file)
+  }
+  # The product display name is not the same as the old shortcut name after a
+  # rename. Recreate the shortcut on every install and let the generated NSIS
+  # include remove the old basename(s), so no stale icon remains.
+  nsis$createDesktopShortcut <- "always"
+  if (!is.null(app_name) && nzchar(app_name)) {
+    nsis$shortcutName <- smart_quotes(app_name)
+  }
+  legacy_names <- installer$legacy_shortcut_names %||% character(0)
+  if (is.list(legacy_names)) legacy_names <- unlist(legacy_names, use.names = FALSE)
+  if (length(legacy_names)) {
+    nsis$include <- "build/installer.nsh"
   }
   nsis
 }

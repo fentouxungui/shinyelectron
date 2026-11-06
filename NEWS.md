@@ -149,6 +149,12 @@
   choice. Closing an app window now asks to leave the app (unsaved work is lost)
   and returns to the launcher, the same as Apps > Back to Launcher.
 
+* Windows installers now recreate the desktop shortcut on every install and
+  remove old shortcut names configured with `installer.legacy_shortcut_names`.
+  Renaming the display name (for example ShinyApps -> ShinyApps Store) could
+  otherwise leave the previous shortcut pointing at a stale executable and
+  show a blank icon.
+
 * The catalog is cached on disk and catalog icons are cached locally. Starting
   without a network now shows installed apps — catalog-installed, URL-installed
   and local bundles alike — with their names, descriptions and logos, after at

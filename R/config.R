@@ -562,6 +562,23 @@ validate_config <- function(config) {
     }
   }
 
+  # Old shortcut basenames are emitted into the NSIS installer so a renamed
+  # product does not leave a stale, icon-less desktop/Start Menu shortcut.
+  legacy_names <- config$installer$legacy_shortcut_names
+  if (!is.null(legacy_names)) {
+    if (is.list(legacy_names)) legacy_names <- unlist(legacy_names, use.names = FALSE)
+    if (!is.character(legacy_names) || anyNA(legacy_names) ||
+        any(!nzchar(trimws(legacy_names)))) {
+      cli::cli_warn(c(
+        "Invalid {.field installer.legacy_shortcut_names} in config",
+        "i" = "Must be a character vector of shortcut basenames; ignoring it"
+      ))
+      config$installer$legacy_shortcut_names <- NULL
+    } else {
+      config$installer$legacy_shortcut_names <- unique(trimws(legacy_names))
+    }
+  }
+
   # electron-builder only lets the wizard installer change the installation
   # directory, and it rejects the combination only while building the Windows
   # installer, after the runtime download. An unset one_click means one-click.
@@ -882,6 +899,7 @@ nodejs:
 # installer:
 #   app_id: null                  # null = "com.shinyelectron.<slug>"
 #   license_file: null            # Windows installer license page; path relative to the app dir
+#   legacy_shortcut_names: []     # old desktop/Start Menu shortcut names removed on upgrade
 #   one_click: true               # Windows: true = silent install, false = wizard
 #   # true adds a page for choosing the install directory; requires one_click: false
 #   allow_to_change_installation_directory: null

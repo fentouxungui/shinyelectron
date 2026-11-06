@@ -143,11 +143,11 @@ test_that("generate_package_json respects config electron version override", {
 test_that("build_nsis_config maps installer options", {
   expect_equal(
     build_nsis_config(list(installer = list(one_click = TRUE))),
-    list(oneClick = TRUE)
+    list(oneClick = TRUE, createDesktopShortcut = "always")
   )
   expect_equal(
     build_nsis_config(list(installer = list(one_click = FALSE))),
-    list(oneClick = FALSE)
+    list(oneClick = FALSE, createDesktopShortcut = "always")
   )
   expect_equal(
     build_nsis_config(list(installer = list(
@@ -156,14 +156,14 @@ test_that("build_nsis_config maps installer options", {
       per_machine = FALSE
     ))),
     list(oneClick = FALSE, allowToChangeInstallationDirectory = TRUE,
-         perMachine = FALSE)
+         perMachine = FALSE, createDesktopShortcut = "always")
   )
 })
 
 test_that("build_nsis_config passes explicit per_machine through", {
   expect_equal(
     build_nsis_config(list(installer = list(one_click = TRUE, per_machine = TRUE))),
-    list(oneClick = TRUE, perMachine = TRUE)
+    list(oneClick = TRUE, perMachine = TRUE, createDesktopShortcut = "always")
   )
   expect_equal(
     build_nsis_config(list(installer = list(
@@ -172,26 +172,38 @@ test_that("build_nsis_config passes explicit per_machine through", {
       per_machine = TRUE
     ))),
     list(oneClick = FALSE, allowToChangeInstallationDirectory = FALSE,
-         perMachine = TRUE)
+         perMachine = TRUE, createDesktopShortcut = "always")
   )
 })
 
-test_that("build_nsis_config is empty without installer options", {
-  expect_equal(build_nsis_config(list()), list())
+test_that("build_nsis_config always recreates the desktop shortcut", {
+  expect_equal(
+    build_nsis_config(list(), app_name = "My App"),
+    list(createDesktopShortcut = "always", shortcutName = "My App")
+  )
+  expect_equal(
+    build_nsis_config(list(installer = list(
+      legacy_shortcut_names = c("Old Name", "old-name")
+    ))),
+    list(createDesktopShortcut = "always", include = "build/installer.nsh")
+  )
+})
 
+test_that("generate_package_json includes the default NSIS shortcut policy", {
   parsed <- jsonlite::fromJSON(
     generate_package_json("my-app", "1.0.0", "native-r", list()),
     simplifyVector = FALSE
   )
-  expect_null(parsed$build$nsis)
+  expect_equal(parsed$build$nsis, list(createDesktopShortcut = "always"))
 })
 
-test_that("generate_package_json emits only oneClick for the default installer", {
+test_that("generate_package_json emits only oneClick and shortcut policy", {
   parsed <- jsonlite::fromJSON(
     generate_package_json("my-app", "1.0.0", "native-r", default_config()),
     simplifyVector = FALSE
   )
-  expect_equal(parsed$build$nsis, list(oneClick = TRUE))
+  expect_equal(parsed$build$nsis,
+               list(oneClick = TRUE, createDesktopShortcut = "always"))
 })
 
 test_that("generate_package_json adds no directory page to the wizard by default", {
@@ -201,7 +213,8 @@ test_that("generate_package_json adds no directory page to the wizard by default
     generate_package_json("my-app", "1.0.0", "native-r", cfg),
     simplifyVector = FALSE
   )
-  expect_equal(parsed$build$nsis, list(oneClick = FALSE))
+  expect_equal(parsed$build$nsis,
+               list(oneClick = FALSE, createDesktopShortcut = "always"))
 })
 
 test_that("generate_package_json emits installer.license_file as the NSIS license", {
@@ -214,7 +227,8 @@ test_that("generate_package_json emits installer.license_file as the NSIS licens
   # electron-builder 26 rejects `license` under `win`; it is an NSIS option.
   expect_null(parsed$build$win$license)
   expect_equal(parsed$build$nsis,
-               list(oneClick = TRUE, license = "build/installer-license.txt"))
+               list(oneClick = TRUE, license = "build/installer-license.txt",
+                    createDesktopShortcut = "always"))
 })
 
 test_that("installer_license_path keeps the license format", {

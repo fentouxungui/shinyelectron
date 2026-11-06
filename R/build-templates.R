@@ -334,6 +334,28 @@ copy_brand_assets <- function(output_dir, icon, config, apps = NULL) {
       fs::file_copy(app[["icon"]], dest, overwrite = TRUE)
     }
   }
+
+  # A product rename (for example ShinyApps -> ShinyApps Store) changes the
+  # shortcut name. Electron-builder preserves an existing shortcut on update,
+  # so the old .lnk can keep a stale target/icon. Remove only the configured
+  # legacy basenames; the new shortcut is recreated by createDesktopShortcut.
+  legacy <- config$installer$legacy_shortcut_names %||% character(0)
+  if (is.list(legacy)) legacy <- unlist(legacy, use.names = FALSE)
+  legacy <- unique(gsub("[\"\\\\/\\r\\n]", "", legacy))
+  legacy <- legacy[nzchar(legacy)]
+  if (length(legacy)) {
+    include_dir <- fs::path(output_dir, "build")
+    fs::dir_create(include_dir, recurse = TRUE)
+    lines <- c("!macro customInstall")
+    for (name in legacy) {
+      lines <- c(lines,
+                 sprintf('  Delete "$DESKTOP\\%s.lnk"', name),
+                 sprintf('  Delete "$SMPROGRAMS\\%s.lnk"', name),
+                 sprintf('  RMDir /r "$SMPROGRAMS\\%s"', name))
+    }
+    lines <- c(lines, "!macroend", "")
+    writeLines(lines, fs::path(include_dir, "installer.nsh"))
+  }
 }
 
 #' Warn when the tray cannot read its icon on a target platform
