@@ -144,6 +144,11 @@
 * Stopping an app now updates its card immediately, and a failed stop shows an
   error on the card, instead of leaving it marked Running until another refresh.
 
+* Closing the launcher window now asks whether to minimize to the system tray or
+  quit, with a "Do not ask again" checkbox; Settings > Close Button resets that
+  choice. Closing an app window now asks to leave the app (unsaved work is lost)
+  and returns to the launcher, the same as Apps > Back to Launcher.
+
 * The catalog is cached on disk and catalog icons are cached locally. Starting
   without a network now shows installed apps — catalog-installed, URL-installed
   and local bundles alike — with their names, descriptions and logos, after at

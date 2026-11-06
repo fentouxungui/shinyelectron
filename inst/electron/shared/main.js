@@ -796,6 +796,57 @@ async function runStoreAction(actionType, storeId) {
 // is launched; reset to null on the launcher so Help/About show the shell.
 let currentAppMeta = null;
 
+// Launcher close behaviour. The default asks every time; "Do not ask again"
+// (or Settings > Close Button) stores the chosen action.
+let launcherClosePromptOpen = false;
+function showLauncherCloseDialog() {
+  if (launcherClosePromptOpen || !mainWindow || mainWindow.isDestroyed()) return;
+  const trayAvailable = {{#tray_enabled}}true{{/tray_enabled}}{{^tray_enabled}}false{{/tray_enabled}};
+  const buttons = trayAvailable
+    ? ['Minimize to Tray', 'Quit', 'Cancel']
+    : ['Quit', 'Cancel'];
+  const cancelId = buttons.length - 1;
+  const { dialog } = require('electron');
+  launcherClosePromptOpen = true;
+  dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    title: 'Close ' + shellDisplayName() + '?',
+    message: trayAvailable
+      ? 'Minimize to the system tray or quit ' + shellDisplayName() + '?'
+      : 'Quit ' + shellDisplayName() + '?',
+    detail: trayAvailable ? 'You can reopen the window from the tray.' : '',
+    buttons: buttons,
+    defaultId: 0,
+    cancelId: cancelId,
+    noLink: true,
+    checkboxLabel: 'Do not ask again',
+    checkboxChecked: false
+  }).then(function(res) {
+    launcherClosePromptOpen = false;
+    if (res.response === cancelId) return;
+    const action = trayAvailable && res.response === 0 ? 'tray' : 'quit';
+    if (res.checkboxChecked) {
+      appSettings.launcherCloseAction = action;
+      saveSettings();
+      if (typeof createMenu === 'function') createMenu();
+    }
+    if (action === 'tray') {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+    } else {
+      app.isQuitting = true;
+      app.quit();
+    }
+  }).catch(function() {
+    launcherClosePromptOpen = false;
+  });
+}
+function setLauncherCloseAction(action) {
+  if (action === 'tray' || action === 'quit') appSettings.launcherCloseAction = action;
+  else delete appSettings.launcherCloseAction;
+  saveSettings();
+  if (typeof createMenu === 'function') createMenu();
+}
+
 // Merge the runtime sources for "what is running now": a catalog entry (name,
 // description, homepage, docs, email, author, copyright), the installed
 // manifest version, and the baked apps-manifest entry (fallbacks).
@@ -1098,24 +1149,27 @@ async function showAboutDialog() {
   if (actions[response]) await actions[response]();
 }
 
-  // Return to the launcher: confirm first (unsaved analysis is discarded),
-  // then wait for the backend to actually exit before showing the launcher.
+  // Return to the launcher: confirm first (unsaved work is discarded), then
+  // wait for the backend to actually exit before showing the launcher.
+  var leavePromptOpen = false;
   function leaveToLauncher() {
-    if (!appsManifest) return;
+    if (!appsManifest || leavePromptOpen) return;
     var cur = appsManifest.apps.find(function(a) { return a.id === lastSelectedAppId; });
     // Catalog apps are not in the baked suite manifest, so prefer the running
     // app's own metadata over the placeholder lookup.
     var curName = (currentAppMeta && currentAppMeta.name) || (cur && cur.name) || '{{{app_name_js}}}';
 
+    leavePromptOpen = true;
     var { dialog } = require('electron');
     dialog.showMessageBox(mainWindow, {
       type: 'question',
       buttons: ['Leave app', 'Cancel'],
       defaultId: 1, cancelId: 1, noLink: true,
-      title: 'Return to launcher',
-      message: 'Return to the launcher?',
-      detail: 'Any unsaved analysis in "' + curName + '" will be lost.'
+      title: 'Close ' + curName + '?',
+      message: 'Close this app and return to the launcher?',
+      detail: 'Any unsaved work in "' + curName + '" will be lost.'
     }).then(function(res) {
+      leavePromptOpen = false;
       if (res.response !== 0) return;
       currentAppMeta = null;
       if (currentBackend && currentBackend !== sharedShinyliveServer) {
@@ -1135,6 +1189,8 @@ async function showAboutDialog() {
         currentBackend = null;
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
       }
+    }).catch(function() {
+      leavePromptOpen = false;
     });
   }
 
@@ -1250,6 +1306,14 @@ function buildSettingsSubmenu() {
       { label: 'System', type: 'radio', checked: currentThemeMode === 'system', click: function () { storeCommand({ cmd: 'set_theme', theme: 'system' }); } },
       { label: 'Light', type: 'radio', checked: currentThemeMode === 'light', click: function () { storeCommand({ cmd: 'set_theme', theme: 'light' }); } },
       { label: 'Dark', type: 'radio', checked: currentThemeMode === 'dark', click: function () { storeCommand({ cmd: 'set_theme', theme: 'dark' }); } }
+    ]
+  });
+  sub.push({
+    label: 'Close Button',
+    submenu: [
+      { label: 'Ask Every Time', type: 'radio', checked: !appSettings.launcherCloseAction, click: function () { setLauncherCloseAction(''); } },
+      { label: 'Minimize to Tray', type: 'radio', checked: appSettings.launcherCloseAction === 'tray', click: function () { setLauncherCloseAction('tray'); } },
+      { label: 'Quit', type: 'radio', checked: appSettings.launcherCloseAction === 'quit', click: function () { setLauncherCloseAction('quit'); } }
     ]
   });
   // A plain item with a leading check mark keeps the whole Settings submenu from
@@ -2968,6 +3032,44 @@ function createWindow() {
 
   // Shutdown flow
   mainWindow.on('close', (event) => {
+    // Multi-app store: closing the app page returns to the launcher; closing
+    // the launcher asks whether to hide to the tray or quit.
+    if (appsManifest) {
+      if (isShuttingDown || app.isQuitting) return;
+      let url = '';
+      try { url = mainWindow.webContents.getURL() || ''; } catch (e) {}
+      const onLauncher = url.indexOf('launcher.html') !== -1 ||
+        (!url && isLauncherVisible);
+      if (!onLauncher) {
+        event.preventDefault();
+        if (typeof leaveToLauncher === 'function') {
+          leaveToLauncher();
+        } else {
+          // Menu-less multi-app build: still return to the launcher rather
+          // than closing the shell.
+          if (currentBackend) { currentBackend.removeAllListeners(); currentBackend.stop(); }
+          currentBackend = null;
+          currentAppMeta = null;
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+        }
+        return;
+      }
+
+      event.preventDefault();
+      const trayAvailable = {{#tray_enabled}}true{{/tray_enabled}}{{^tray_enabled}}false{{/tray_enabled}};
+      if (appSettings.launcherCloseAction === 'quit') {
+        app.isQuitting = true;
+        app.quit();
+        return;
+      }
+      if (appSettings.launcherCloseAction === 'tray' && trayAvailable) {
+        mainWindow.hide();
+        return;
+      }
+      showLauncherCloseDialog();
+      return;
+    }
+
     {{#tray_enabled}}
     {{#close_to_tray}}
     if (!app.isQuitting && !isShuttingDown) {
