@@ -489,6 +489,10 @@ function createAppStore(options) {
   let catalog = null;
   let catalogFetchedAt = 0;
   const CATALOG_TTL_MS = 60000;
+  // An unchanged icon URL is revalidated at most once per this interval, so a
+  // catalog refresh does not re-download every icon. A changed URL always
+  // downloads immediately.
+  const ICON_REVALIDATE_MS = 10 * 60 * 1000;
   const running = new Map();
   // Icon cache: catalog icons are remote; cache them so installed cards still
   // show their logo offline. `iconDataCache` holds the base64 data URLs that
@@ -620,9 +624,26 @@ function createAppStore(options) {
         const a = todo[next++];
         try {
           const prev = iconIndex[a.id];
-          if (prev && prev.url === a.icon && prev.file &&
-              fs.existsSync(path.join(iconCacheDir, prev.file))) continue;
-          const res = await httpGet(a.icon);
+          const sameUrl = !!(prev && prev.url === a.icon && prev.file);
+          const cached = sameUrl && fs.existsSync(path.join(iconCacheDir, prev.file));
+          if (cached && prev.checkedAt && (Date.now() - Number(prev.checkedAt)) < ICON_REVALIDATE_MS) continue;
+          // Same URL, possibly changed bytes: revalidate instead of trusting the
+          // cached file. A cached file without validators simply re-downloads.
+          const headers = {};
+          if (cached) {
+            if (prev.etag) headers['If-None-Match'] = prev.etag;
+            if (prev.lastModified) headers['If-Modified-Since'] = prev.lastModified;
+          }
+          const res = await httpGet(a.icon, headers);
+          if (res.statusCode === 304) {
+            res.resume();
+            if (cached) {
+              if (res.headers.etag) prev.etag = res.headers.etag;
+              if (res.headers['last-modified']) prev.lastModified = res.headers['last-modified'];
+              prev.checkedAt = Date.now();
+            }
+            continue;
+          }
           if (res.statusCode !== 200) { res.destroy(); continue; }
           const type = String(res.headers['content-type'] || '').toLowerCase();
           if (type && type.indexOf('image/') !== 0) { res.destroy(); continue; }
@@ -645,7 +666,12 @@ function createAppStore(options) {
           if (prev && prev.file && prev.file !== file) {
             try { fs.rmSync(path.join(iconCacheDir, prev.file), { force: true }); } catch (e) {}
           }
-          iconIndex[a.id] = { url: a.icon, file: file, mime: type || 'image/png' };
+          iconIndex[a.id] = {
+            url: a.icon, file: file, mime: type || 'image/png',
+            etag: res.headers.etag || '',
+            lastModified: res.headers['last-modified'] || '',
+            checkedAt: Date.now()
+          };
           iconDataCache.delete(String(a.id));
         } catch (e) {
           log('warn: could not cache icon for ' + a.id + ': ' + e.message);
