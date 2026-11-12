@@ -4,14 +4,17 @@
 \alias{build_nsis_config}
 \title{Build the electron-builder \code{nsis} block from installer config}
 \usage{
-build_nsis_config(config)
+build_nsis_config(config, app_name = NULL)
 }
 \arguments{
 \item{config}{List. The effective configuration.}
+
+\item{app_name}{Character display name used for the shortcut label.}
 }
 \value{
-A named list for the package.json \code{build.nsis} field, empty when
-no installer option is set.
+A named list for the package.json \code{build.nsis} field. It always
+includes the shortcut recreation policy, plus any configured installer
+options.
 }
 \description{
 Maps \code{installer.one_click}, \code{installer.allow_to_change_installation_directory}

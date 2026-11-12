@@ -207,6 +207,9 @@ generate_template_variables <- function(app_name, app_slug, app_type,
     log_dir = log_dir,
     log_dir_js = js_str(log_dir),
 
+    # Launch-failure reporting (empty disables the feature)
+    report_endpoint_js = js_str(config$report$endpoint %||% ""),
+
     # Multi-app
     is_multi_app = is_multi_app,
     apps_json = if (is_multi_app) json_for_script(apps_manifest) else "[]"

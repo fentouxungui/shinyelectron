@@ -55,7 +55,10 @@ default_config <- function() {
     preloader = SHINYELECTRON_DEFAULTS$preloader,
     signing = SHINYELECTRON_DEFAULTS$signing,
     lifecycle = SHINYELECTRON_DEFAULTS$lifecycle,
-    installer = SHINYELECTRON_DEFAULTS$installer
+    installer = SHINYELECTRON_DEFAULTS$installer,
+    report = list(
+      endpoint = NULL
+    )
   )
 }
 

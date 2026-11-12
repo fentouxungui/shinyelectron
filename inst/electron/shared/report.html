@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+  <title>Report a Problem - {{app_name}}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 24px 28px 28px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color: #64748b; font-size: 13px; margin-bottom: 18px; }
+    .summary {
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+      padding: 12px 14px; white-space: pre-wrap; line-height: 1.45;
+      margin-bottom: 16px;
+    }
+    .meta {
+      display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px;
+      font-size: 12px; color: #334155; margin-bottom: 16px;
+    }
+    .meta b { color: #64748b; font-weight: 500; }
+    .section-title { font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
+    label.check {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 13px; color: #334155; margin-bottom: 8px;
+    }
+    textarea {
+      width: 100%; min-height: 90px; resize: vertical;
+      border: 1px solid #cbd5e1; border-radius: 6px;
+      padding: 10px; font: inherit; font-size: 13px;
+    }
+    input.email {
+      width: 100%; border: 1px solid #cbd5e1; border-radius: 6px;
+      padding: 8px 10px; font: inherit; font-size: 13px;
+    }
+    select.select {
+      width: 100%; border: 1px solid #cbd5e1; border-radius: 6px;
+      padding: 8px 10px; font: inherit; font-size: 13px; background: #fff;
+    }
+    pre {
+      background: #0f172a; color: #e2e8f0; border-radius: 6px;
+      padding: 12px; font-size: 11px; line-height: 1.45;
+      max-height: 180px; overflow: auto; white-space: pre-wrap;
+      word-break: break-word; margin: 0;
+    }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; font-size: 12px; color: #475569; }
+    .buttons {
+      display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;
+    }
+    button {
+      border: 0; border-radius: 6px; padding: 8px 16px;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .primary { background: #2563eb; color: #fff; }
+    .secondary { background: #e2e8f0; color: #334155; }
+    .status { margin-top: 12px; font-size: 12px; min-height: 18px; }
+    .status.ok { color: #15803d; }
+    .status.err { color: #b91c1c; }
+    .status.info { color: #475569; }
+    .hint { font-size: 12px; color: #64748b; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 id="title">App launch failed</h1>
+    <div class="sub" id="sub"></div>
+    <div class="summary" id="summary"></div>
+    <div class="meta" id="meta"></div>
+
+    <div id="app-wrap" style="display:none">
+      <div class="section-title">Affected app</div>
+      <select class="select" id="app"></select>
+    </div>
+
+    <div id="category-wrap" style="display:none">
+      <div class="section-title">Problem type</div>
+      <select class="select" id="category">
+        <option value="other">Other</option>
+        <option value="launch_failure">App won't start</option>
+        <option value="runtime_crash">App crashes while running</option>
+        <option value="feature_broken">A feature doesn't work</option>
+        <option value="ui_issue">Display / UI problem</option>
+      </select>
+    </div>
+
+    <div id="note-wrap" style="display:none">
+      <div class="section-title">What went wrong? (required)</div>
+      <textarea id="note" placeholder="Describe the problem you saw. This text becomes the issue summary."></textarea>
+      <div class="hint">Sending creates a GitHub issue in the ShinyApps reports repository.</div>
+    </div>
+
+    <div class="section-title">Email (optional)</div>
+    <input type="email" class="email" id="email" placeholder="you@example.com" autocomplete="email">
+    <div class="hint">Only used to let you know when this report is resolved. Stored locally and included in the private report.</div>
+
+    <div class="section-title">Diagnostics</div>
+    <label class="check"><input type="checkbox" id="include-log" checked> Include recent log</label>
+    <pre id="log">No log attached.</pre>
+
+    <details>
+      <summary>Show raw payload</summary>
+      <pre id="raw"></pre>
+    </details>
+
+    <div class="buttons">
+      <button class="primary" id="send">Send report</button>
+      <button class="secondary" id="copy">Copy diagnostics</button>
+      <button class="secondary" id="cancel">Cancel</button>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <script>
+    (function () {
+      var state = null;
+      var sent = false;
+      var statusEl = document.getElementById('status');
+      var sendEl = document.getElementById('send');
+      var copyEl = document.getElementById('copy');
+      var cancelEl = document.getElementById('cancel');
+      var logEl = document.getElementById('log');
+      var includeEl = document.getElementById('include-log');
+      var noteWrap = document.getElementById('note-wrap');
+      var noteEl = document.getElementById('note');
+      var emailEl = document.getElementById('email');
+      var appWrap = document.getElementById('app-wrap');
+      var appEl = document.getElementById('app');
+      var categoryWrap = document.getElementById('category-wrap');
+      var categoryEl = document.getElementById('category');
+      var rawEl = document.getElementById('raw');
+
+      if (!window.reportApi) {
+        statusEl.textContent = 'Report bridge unavailable.';
+        return;
+      }
+
+      var CATEGORY_PHASE = {
+        launch_failure: 'manual_launch_failure',
+        runtime_crash: 'manual_runtime_crash',
+        feature_broken: 'manual_feature_broken',
+        ui_issue: 'manual_ui_issue',
+        other: 'manual_report'
+      };
+
+      function setStatus(text, kind) {
+        statusEl.textContent = text || '';
+        statusEl.className = 'status' + (kind ? ' ' + kind : '');
+      }
+
+      function validEmail(value) {
+        return !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+      }
+
+      function currentPayload() {
+        if (!state) return {};
+        var payload = JSON.parse(JSON.stringify(state.payload));
+        payload.email = emailEl.value.trim();
+        if (state.mode === 'manual') {
+          payload.summary = noteEl.value.trim();
+          payload.category = categoryEl.value;
+          payload.phase = CATEGORY_PHASE[categoryEl.value] || payload.phase;
+          payload.selectedAppId = appEl.value;
+          payload.includeLog = includeEl.checked;
+          // The main process attaches the selected app's latest log and
+          // recomputes the fingerprint from the final fields.
+          payload.logTail = '';
+          payload.fingerprint = '';
+          var chosen = (state.apps || []).find(function (a) { return a.id === appEl.value; });
+          if (chosen) {
+            payload.appId = chosen.id;
+            payload.appVersion = chosen.version || '';
+            payload.catalogVersion = chosen.catalogVersion || '';
+            payload.bundleSha256 = chosen.bundleSha256 || '';
+            payload.installSource = chosen.installSource || '';
+          }
+        } else {
+          payload.includeLog = includeEl.checked;
+          if (!includeEl.checked) payload.logTail = '';
+        }
+        return payload;
+      }
+
+      function updateLogPreview() {
+        if (state.mode === 'manual') {
+          logEl.textContent = includeEl.checked
+            ? 'The latest log from the selected app will be attached.'
+            : 'Log will not be included.';
+        } else {
+          logEl.textContent = includeEl.checked
+            ? (state.payload.logTail || 'No log attached.')
+            : 'Log will not be included.';
+        }
+        logEl.style.opacity = includeEl.checked ? '1' : '0.45';
+      }
+
+      function renderMeta(p) {
+        var rows = [
+          ['App', (p.appId || '') + (p.appVersion ? ' ' + p.appVersion : '')],
+          ['Platform', p.platform || ''],
+          ['Phase', p.phase || ''],
+          ['Shell / R', (p.shellVersion || '?') + ' / ' + (p.rVersion || '?')],
+          ['Catalog', p.catalogVersion || 'unknown'],
+          ['Bundle', p.bundleSha256 ? String(p.bundleSha256).slice(0, 12) : 'unknown'],
+          ['Fingerprint', state.mode === 'manual' ? 'computed on send' : (p.fingerprint || '')]
+        ];
+        var meta = document.getElementById('meta');
+        meta.textContent = '';
+        rows.forEach(function (row) {
+          var b = document.createElement('b');
+          b.textContent = row[0];
+          var v = document.createElement('span');
+          v.textContent = row[1];
+          meta.appendChild(b);
+          meta.appendChild(v);
+        });
+      }
+
+      function refreshRaw() {
+        var current = currentPayload();
+        rawEl.textContent = JSON.stringify(current, null, 2);
+        renderMeta(current);
+      }
+
+      function updateSend() {
+        var manual = state && state.mode === 'manual';
+        sendEl.disabled = sent || (manual && !noteEl.value.trim());
+      }
+
+      function render() {
+        var payload = state.payload;
+        document.getElementById('title').textContent =
+          state.mode === 'manual' ? 'Report a Problem' : 'App launch failed';
+        document.getElementById('sub').textContent = state.mode === 'manual'
+          ? 'Send diagnostics to the ShinyApps maintainer, or copy them for another channel.'
+          : 'The app could not start. Review what will be sent before reporting it.';
+        var summaryEl = document.getElementById('summary');
+        summaryEl.textContent = payload.summary || '';
+        summaryEl.style.display = state.mode === 'manual' ? 'none' : 'block';
+
+        if (state.mode === 'manual') {
+          noteWrap.style.display = 'block';
+          appWrap.style.display = 'block';
+          categoryWrap.style.display = 'block';
+          appEl.textContent = '';
+          (state.apps || []).forEach(function (a) {
+            var opt = document.createElement('option');
+            opt.value = a.id;
+            opt.textContent = a.name + (a.version ? ' (v' + a.version + ')' : '');
+            appEl.appendChild(opt);
+          });
+          appEl.value = state.defaultAppId || (state.apps && state.apps[0] && state.apps[0].id) || 'shinyapps-store';
+          categoryEl.value = 'other';
+          noteEl.focus();
+        } else if (!payload.logTail) {
+          includeEl.checked = false;
+          includeEl.disabled = true;
+        }
+        emailEl.value = state.email || '';
+        updateLogPreview();
+        refreshRaw();
+        updateSend();
+      }
+
+      sendEl.addEventListener('click', function () {
+        if (sent || !state) return;
+        var payload = currentPayload();
+        if (state.mode === 'manual' && !payload.summary) {
+          setStatus('Please describe the problem first.', 'err');
+          return;
+        }
+        if (!validEmail(payload.email)) {
+          setStatus('Please enter a valid email or leave it blank.', 'err');
+          return;
+        }
+        setStatus('Sending...', 'info');
+        sendEl.disabled = true;
+        window.reportApi.action('send', payload);
+      });
+
+      copyEl.addEventListener('click', function () {
+        if (!state) return;
+        var payload = currentPayload();
+        if (!validEmail(payload.email)) {
+          setStatus('Please enter a valid email or leave it blank.', 'err');
+          return;
+        }
+        window.reportApi.action('copy', payload);
+      });
+
+      cancelEl.addEventListener('click', function () {
+        window.reportApi.action('cancel');
+      });
+
+      includeEl.addEventListener('change', function () {
+        updateLogPreview();
+        refreshRaw();
+      });
+
+      noteEl.addEventListener('input', function () {
+        updateSend();
+        refreshRaw();
+      });
+
+      emailEl.addEventListener('input', refreshRaw);
+
+      appEl.addEventListener('change', function () {
+        updateLogPreview();
+        refreshRaw();
+      });
+
+      categoryEl.addEventListener('change', refreshRaw);
+
+      window.reportApi.onStatus(function (data) {
+        setStatus(data.message || '', data.kind || '');
+        if (data.kind === 'ok') {
+          sent = true;
+          sendEl.disabled = true;
+          cancelEl.textContent = 'Close';
+        } else if (data.kind === 'err') {
+          sendEl.disabled = false;
+          updateSend();
+        }
+      });
+
+      window.reportApi.getPayload().then(function (s) {
+        if (!s) {
+          setStatus('No report data available.', 'err');
+          return;
+        }
+        state = s;
+        render();
+      }).catch(function (e) {
+        setStatus('Could not load report data: ' + (e && e.message ? e.message : e), 'err');
+      });
+    })();
+  </script>
+</body>
+</html>

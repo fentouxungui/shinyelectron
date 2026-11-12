@@ -232,7 +232,8 @@ test_that("config strings used in JavaScript literals get escaped *_js entries",
       app = list(version = 2, log_level = "info", log_dir = "C:\\logs"),
       tray = list(icon = "icons/Bob's tray.png"),
       menu = list(help_url = "https://example.org/?a=1&b=it's"),
-      preloader = list(background = "url('bg.png') #fff")
+      preloader = list(background = "url('bg.png') #fff"),
+      report = list(endpoint = "https://example.org/v1/report")
     ),
     is_multi_app = TRUE,
     apps_manifest = list(list(id = "a", name = "<A>", description = "", path = "p", type = "r-shiny"))
@@ -245,6 +246,7 @@ test_that("config strings used in JavaScript literals get escaped *_js entries",
   expect_identical(vars$help_url_js, "https://example.org/?a=1&b=it\\'s")
   expect_identical(vars$log_dir_js, "C:\\\\logs")
   expect_identical(vars$log_level_js, "info")
+  expect_identical(vars$report_endpoint_js, "https://example.org/v1/report")
   expect_identical(vars$preloader_background_js, "url(\\'bg.png\\') #fff")
   expect_identical(
     vars$apps_json,

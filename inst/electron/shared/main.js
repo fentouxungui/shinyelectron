@@ -22,6 +22,7 @@ const { createAppStore, cmpVersion, platformKey, downloadUrls } = require('./bac
 // File logging -- writes to configured log directory or app userData
 const LOG_LEVEL = '{{{log_level_js}}}';
 const SHELL_R_VERSION = '{{{r_version_js}}}';   // R version the shell bundles
+const REPORT_ENDPOINT = '{{{report_endpoint_js}}}';  // empty disables launch-failure reporting
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 const LOG_THRESHOLD = LOG_LEVEL in LOG_LEVELS ? LOG_LEVELS[LOG_LEVEL] : 1;
 
@@ -216,6 +217,505 @@ function installCrashHandlers() {
   process.on('unhandledRejection', (reason) => { writeCrash('unhandledRejection', reason); });
 }
 
+// ---- Launch-failure reporting ---------------------------------------------
+// Optional, build-time endpoint (`report.endpoint` in _shinyelectron.yml).
+// When set, a failed launch offers to send a redacted diagnostic report.
+// Nothing is uploaded without the user choosing "Send report".
+const REPORT_TIMEOUT_MS = 20000;
+let reportWindow = null;
+let reportState = null;
+let lastReportKey = '';
+let lastReportAt = 0;
+
+function reportEndpoint() {
+  return String(appSettings.reportEndpoint || REPORT_ENDPOINT || '').trim();
+}
+
+function reportInstallId() {
+  if (!appSettings.reportInstallId) {
+    try {
+      appSettings.reportInstallId = require('crypto').randomUUID();
+      saveSettings();
+    } catch (e) {
+      appSettings.reportInstallId = 'unknown';
+    }
+  }
+  return appSettings.reportInstallId;
+}
+
+// Remove the user's home directory, temp directory, and account name from
+// log text. Paths stay visible enough to diagnose problems without exposing
+// who the user is.
+function redactReportText(text) {
+  let s = String(text || '');
+  const user = process.env.USERNAME || process.env.USER || '';
+  const replaceAll = (value, tag) => {
+    if (!value) return;
+    const forms = [value, value.replace(/\\/g, '/'), value.replace(/\//g, '\\')];
+    for (const form of forms) {
+      if (form) s = s.split(form).join(tag);
+    }
+  };
+  replaceAll(os.homedir(), '<home>');
+  replaceAll(os.tmpdir(), '<temp>');
+  if (user) {
+    const escaped = user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    s = s.replace(new RegExp('\\b' + escaped + '\\b', 'gi'), '<user>');
+  }
+  // Common credential shapes. Keep the labels (e.g. "token =") so the log
+  // still shows that a secret existed, but never the secret itself.
+  s = s.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '<private-key>');
+  s = s.replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, '<github-token>');
+  s = s.replace(/\b(?:sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,})\b/g, '<api-key>');
+  s = s.replace(/\bAKIA[0-9A-Z]{16}\b/g, '<aws-key>');
+  s = s.replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, '<google-key>');
+  s = s.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '<slack-token>');
+  s = s.replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{10,}/gi, '$1<token>');
+  s = s.replace(/\b(api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*['"]?[A-Za-z0-9._~+/=-]{8,}['"]?/gi, '$1=<redacted>');
+  return s;
+}
+
+function readLogTail(appId, maxLines = 300) {
+  const p = (appLogAppId && String(appLogAppId) === String(appId) && appLogPath)
+    ? appLogPath
+    : latestAppLog(appId);
+  if (!p || !fs.existsSync(p)) return '';
+  try {
+    const lines = fs.readFileSync(p, 'utf8').split(/\r?\n/);
+    return lines.slice(-maxLines).join('\n').slice(-200000);
+  } catch (e) {
+    return '';
+  }
+}
+
+function reportAppContext(appId) {
+  const ins = (appId && appStore && appStore.isInstalled(appId))
+    ? appStore.getState().apps[appId]
+    : null;
+  const ce = (appId && appStore) ? appStore.catalogEntry(appId) : null;
+  // Catalog installs do not store the archive hash in state.json; the catalog
+  // artifact carries it, so use that as a fallback.
+  const artifact = ce && ce.artifacts && ce.artifacts[platformKey()];
+  return {
+    appVersion: (ins && ins.version) || '',
+    catalogVersion: (ce && ce.version) || '',
+    bundleSha256: (ins && ins.sha256) || (artifact && artifact.sha256) || '',
+    installSource: (ins && ins.source) || ''
+  };
+}
+
+function reportAppChoices() {
+  const choices = [];
+  if (appStore) {
+    const st = appStore.getState();
+    for (const id of Object.keys(st.apps || {})) {
+      const ctx = reportAppContext(id);
+      const ce = appStore.catalogEntry(id);
+      const ins = st.apps[id];
+      choices.push({
+        id: id,
+        name: (ce && ce.name) || (ins && ins.meta && ins.meta.name) || id,
+        version: ctx.appVersion,
+        catalogVersion: ctx.catalogVersion,
+        bundleSha256: ctx.bundleSha256,
+        installSource: ctx.installSource
+      });
+    }
+  }
+  choices.sort(function (a, b) { return a.name.localeCompare(b.name); });
+  choices.push({
+    id: 'shinyapps-store',
+    name: 'ShinyApps Store itself',
+    version: app.getVersion(),
+    catalogVersion: '',
+    bundleSha256: '',
+    installSource: 'shell'
+  });
+  return choices;
+}
+
+const REPORT_CATEGORY_PHASES = {
+  launch_failure: 'manual_launch_failure',
+  runtime_crash: 'manual_runtime_crash',
+  feature_broken: 'manual_feature_broken',
+  ui_issue: 'manual_ui_issue',
+  other: 'manual_report'
+};
+
+function reportFingerprint(payload) {
+  return require('crypto').createHash('sha1').update([
+    payload.appId,
+    payload.appVersion,
+    payload.platform,
+    payload.phase,
+    String(payload.exitCode ?? ''),
+    payload.signal || '',
+    String(payload.summary || '').split('\n')[0]
+  ].join('|')).digest('hex');
+}
+
+function buildLaunchReport(incident) {
+  const ctx = reportAppContext(incident.appId);
+  const payload = {
+    schema: 1,
+    installId: reportInstallId(),
+    appId: incident.appId || '',
+    appVersion: ctx.appVersion,
+    catalogVersion: ctx.catalogVersion,
+    bundleSha256: ctx.bundleSha256,
+    installSource: ctx.installSource,
+    shellVersion: app.getVersion(),
+    rVersion: SHELL_R_VERSION || '',
+    platform: platformKey(),
+    os: os.type() + ' ' + os.release() + ' (' + os.arch() + ')',
+    phase: incident.phase || 'pre_ready_failure',
+    exitCode: incident.exitCode ?? null,
+    signal: incident.signal || '',
+    summary: redactReportText(incident.summary || 'App failed to start').slice(0, 2000),
+    fingerprint: '',
+    logTail: redactReportText(incident.logTail || readLogTail(incident.appId)),
+    timestamp: new Date().toISOString()
+  };
+  payload.fingerprint = reportFingerprint(payload);
+  return payload;
+}
+
+function launchReportText(payload) {
+  return [
+    'ShinyApps launch report',
+    'app: ' + payload.appId + ' ' + (payload.appVersion || ''),
+    'platform: ' + payload.platform + '  shell: ' + payload.shellVersion + '  R: ' + payload.rVersion,
+    'catalog: ' + (payload.catalogVersion || 'unknown') +
+      '  bundle: ' + (payload.bundleSha256 ? String(payload.bundleSha256).slice(0, 12) : 'unknown') +
+      '  source: ' + (payload.installSource || 'unknown'),
+    'phase: ' + payload.phase + '  exit: ' + (payload.exitCode ?? '') + ' ' + (payload.signal || ''),
+    'fingerprint: ' + payload.fingerprint,
+    'installId: ' + (payload.installId || 'unknown') + '  time: ' + payload.timestamp,
+    'email: ' + (payload.email || '(not provided)'),
+    '',
+    payload.summary,
+    '',
+    payload.logTail || '(no log attached)'
+  ].join('\n');
+}
+
+function closeReportWindow() {
+  if (reportWindow && !reportWindow.isDestroyed()) reportWindow.close();
+  reportWindow = null;
+  reportState = null;
+}
+
+function openReportWindow() {
+  if (reportWindow && !reportWindow.isDestroyed()) {
+    reportWindow.focus();
+    return;
+  }
+  const { BrowserWindow } = require('electron');
+  reportWindow = new BrowserWindow({
+    width: 780,
+    height: 700,
+    minWidth: 640,
+    minHeight: 520,
+    parent: (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : undefined,
+    modal: true,
+    show: false,
+    resizable: true,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    title: 'Report a Problem',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'report-preload.js'),
+      enableRemoteModule: false,
+      webSecurity: true
+    }
+  });
+  reportWindow.on('closed', function () {
+    reportWindow = null;
+    reportState = null;
+  });
+  reportWindow.once('ready-to-show', function () {
+    if (reportWindow && !reportWindow.isDestroyed()) reportWindow.show();
+  });
+  reportWindow.webContents.on('did-fail-load', function (_event, code, desc) {
+    log('warn', 'report window failed to load:', code, desc);
+    if (reportWindow && !reportWindow.isDestroyed()) reportWindow.show();
+  });
+  reportWindow.loadFile(path.join(__dirname, 'report.html'));
+}
+
+async function postLaunchReport(payload) {
+  const endpoint = reportEndpoint();
+  if (!endpoint) throw new Error('No report endpoint configured');
+  const { net } = require('electron');
+  if (!net || typeof net.fetch !== 'function') throw new Error('net.fetch is unavailable');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REPORT_TIMEOUT_MS);
+  try {
+    const res = await net.fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function pendingReportDir() {
+  const dir = path.join(app.getPath('userData'), 'pending-reports');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* best effort */ }
+  return dir;
+}
+
+function prunePendingReports(maxFiles) {
+  const keep = maxFiles || 50;
+  try {
+    const dir = pendingReportDir();
+    const files = fs.readdirSync(dir)
+      .filter(function (f) { return f.endsWith('.json'); })
+      .map(function (f) {
+        const p = path.join(dir, f);
+        return { p: p, t: fs.statSync(p).mtimeMs };
+      })
+      .sort(function (a, b) { return b.t - a.t; });
+    for (const f of files.slice(keep)) {
+      try { fs.unlinkSync(f.p); } catch (e) { /* best effort */ }
+    }
+  } catch (e) { /* best effort */ }
+}
+
+function savePendingReport(payload) {
+  try {
+    // One queued copy per fingerprint; a retry replaces the old file.
+    try { removePendingReport(payload.fingerprint); } catch (e) { /* best effort */ }
+    const dir = pendingReportDir();
+    const safe = String(payload.fingerprint || 'report')
+      .replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40);
+    const file = path.join(dir, Date.now() + '-' + safe + '.json');
+    fs.writeFileSync(file, JSON.stringify({
+      schema: 1,
+      queuedAt: new Date().toISOString(),
+      payload: payload
+    }, null, 2));
+    prunePendingReports(50);
+    log('info', 'queued launch report for retry:', file);
+    return file;
+  } catch (e) {
+    log('warn', 'could not queue launch report:', e && e.message);
+    return null;
+  }
+}
+
+function removePendingReport(fingerprint) {
+  if (!fingerprint) return;
+  try {
+    const dir = pendingReportDir();
+    for (const f of fs.readdirSync(dir).filter(function (x) { return x.endsWith('.json'); })) {
+      const file = path.join(dir, f);
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (data && data.payload && data.payload.fingerprint === fingerprint) {
+          fs.unlinkSync(file);
+        }
+      } catch (e) { /* leave unreadable files for manual cleanup */ }
+    }
+  } catch (e) { /* best effort */ }
+}
+
+let pendingFlushInFlight = false;
+async function flushPendingReports() {
+  if (pendingFlushInFlight || !reportEndpoint()) return;
+  pendingFlushInFlight = true;
+  try {
+    const dir = pendingReportDir();
+    const files = fs.readdirSync(dir)
+      .filter(function (f) { return f.endsWith('.json'); })
+      .map(function (f) { return path.join(dir, f); });
+    for (const file of files) {
+      try {
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (!data || !data.payload || !data.payload.appId) {
+          fs.unlinkSync(file);
+          continue;
+        }
+        await postLaunchReport(data.payload);
+        fs.unlinkSync(file);
+        log('info', 'pending launch report sent:', data.payload.fingerprint);
+      } catch (e) {
+        log('warn', 'pending launch report still failing:', e && e.message);
+        // Most likely still offline; stop and retry on the next launch.
+        break;
+      }
+    }
+  } catch (e) {
+    log('warn', 'pending report flush failed:', e && e.message);
+  } finally {
+    pendingFlushInFlight = false;
+  }
+}
+
+async function reportLaunchFailure(incident) {
+  if (!reportEndpoint()) return;
+  const payload = buildLaunchReport(incident);
+  const manual = payload.phase === 'manual_report';
+  if (!manual) {
+    const now = Date.now();
+    // Do not ask again for the same failure within five minutes.
+    if (payload.fingerprint === lastReportKey && now - lastReportAt < 5 * 60 * 1000) return;
+  }
+  // A manual report opens every time; an open dialog is just focused.
+  if (reportWindow && !reportWindow.isDestroyed()) {
+    reportWindow.focus();
+    return;
+  }
+  const choices = manual ? reportAppChoices() : [];
+  const preferred = lastSelectedAppId || '';
+  const defaultAppId = manual && choices.some(function (c) { return c.id === preferred; })
+    ? preferred
+    : (manual ? 'shinyapps-store' : payload.appId);
+  reportState = {
+    mode: manual ? 'manual' : 'failure',
+    payload,
+    email: appSettings.reportEmail || '',
+    apps: choices,
+    defaultAppId: defaultAppId
+  };
+  openReportWindow();
+}
+
+ipcMain.handle('report-get-payload', () => reportState);
+
+ipcMain.on('report-action', async (_event, data) => {
+  if (!reportState || !reportWindow || reportWindow.isDestroyed()) return;
+  const action = data && data.action;
+  const incoming = (data && data.payload) || {};
+  // The renderer may edit only the summary (manual reports) and whether the
+  // log is included; everything else stays the main process's payload.
+  const payload = Object.assign({}, reportState.payload);
+  if (reportState.mode === 'manual') {
+    if (typeof incoming.summary === 'string') {
+      payload.summary = incoming.summary.slice(0, 2000);
+    }
+    if (typeof incoming.category === 'string' && REPORT_CATEGORY_PHASES[incoming.category]) {
+      payload.category = incoming.category;
+      payload.phase = REPORT_CATEGORY_PHASES[incoming.category];
+    } else {
+      payload.category = payload.category || 'other';
+    }
+    if (typeof incoming.selectedAppId === 'string') {
+      const chosen = (reportState.apps || []).find(function (a) {
+        return a.id === incoming.selectedAppId;
+      });
+      if (chosen) {
+        payload.appId = chosen.id;
+        payload.appVersion = chosen.version || '';
+        payload.catalogVersion = chosen.catalogVersion || '';
+        payload.bundleSha256 = chosen.bundleSha256 || '';
+        payload.installSource = chosen.installSource || '';
+        payload.logTail = incoming.includeLog === false ? '' : readLogTail(chosen.id);
+      }
+    } else if (incoming.includeLog === false) {
+      payload.logTail = '';
+    } else if (!payload.logTail) {
+      payload.logTail = readLogTail(payload.appId);
+    }
+  } else {
+    payload.category = payload.category || (
+      payload.phase === 'post_ready_failure' ? 'runtime_crash' : 'launch_failure'
+    );
+    if (typeof incoming.logTail === 'string') {
+      payload.logTail = incoming.logTail.slice(0, 200000);
+    }
+    if (incoming.includeLog === false) payload.logTail = '';
+  }
+  if (typeof incoming.email === 'string') {
+    payload.email = incoming.email.trim().slice(0, 254);
+  }
+  // These are renderer-to-main hints, not part of the report contract.
+  delete payload.selectedAppId;
+  delete payload.includeLog;
+  payload.fingerprint = reportFingerprint(payload);
+
+  const reply = (message, kind) => {
+    if (reportWindow && !reportWindow.isDestroyed()) {
+      reportWindow.webContents.send('report-status', { message, kind });
+    }
+  };
+
+  if (action === 'cancel') {
+    closeReportWindow();
+    return;
+  }
+  // Validate and persist the optional contact address for the next report.
+  if (payload.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.email)) {
+    reply('Please enter a valid email or leave it blank.', 'err');
+    return;
+  }
+  if (payload.email) appSettings.reportEmail = payload.email;
+  else delete appSettings.reportEmail;
+  saveSettings();
+  if (action === 'copy') {
+    const { clipboard } = require('electron');
+    clipboard.writeText(launchReportText(payload));
+    reply('Diagnostics copied to clipboard', 'info');
+    return;
+  }
+  if (action === 'send') {
+    if (reportState.mode === 'manual' && !String(payload.summary || '').trim()) {
+      reply('Please describe the problem first.', 'err');
+      return;
+    }
+    try {
+      const result = await postLaunchReport(payload);
+      lastReportKey = payload.fingerprint;
+      lastReportAt = Date.now();
+      log('info', 'launch report sent:', result.id);
+      removePendingReport(payload.fingerprint);
+      const email = payload.email || '';
+      closeReportWindow();
+      const { dialog, clipboard } = require('electron');
+      const parent = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : null;
+      const opts = {
+        type: 'info',
+        title: 'Report sent',
+        message: 'Report sent successfully',
+        detail: 'Thank you for helping improve ShinyApps Store!' +
+          '\n\nReport ID: ' + result.id +
+          (result.deduped ? ' (added to an existing report)' : '') +
+          (email ? '\n\nWe will email you at ' + email + ' when there is an update.' : ''),
+        buttons: ['Copy report ID', 'OK'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+      };
+      try {
+        const answer = parent
+          ? await dialog.showMessageBox(parent, opts)
+          : await dialog.showMessageBox(opts);
+        if (answer.response === 0) clipboard.writeText(String(result.id));
+      } catch (e2) { /* best effort */ }
+    } catch (e) {
+      log('warn', 'launch report failed:', e && e.message);
+      const queued = savePendingReport(payload);
+      reply(
+        'Could not send the report: ' + (e && e.message ? e.message : String(e)) +
+          (queued
+            ? '. It has been saved and will be retried next time.'
+            : '. You can copy the diagnostics instead.'),
+        'err'
+      );
+    }
+  }
+});
+
 // ---- Uninstall / reset ----------------------------------------------------
 function fmtBytes(bytes) {
   if (!bytes || bytes <= 0) return '0 MB';
@@ -277,7 +777,7 @@ async function wipeAllLocalData(onProgress) {
       if (!targets.some(function (t) { return path.resolve(t) === r; })) targets.push(p);
     } catch (e) { /* skip unusable path */ }
   };
-  for (const t of ['apps', 'lib', 'private', 'store-cache', 'icons', 'catalog-cache.json', 'state.json', 'root.json', 'settings.json', 'logs', 'crashes', 'window-state.json']) {
+  for (const t of ['apps', 'lib', 'private', 'store-cache', 'icons', 'catalog-cache.json', 'state.json', 'root.json', 'settings.json', 'logs', 'crashes', 'window-state.json', 'pending-reports']) {
     addTarget(path.join(userData, t));
   }
   if (path.resolve(dataRoot) !== path.resolve(userData)) {
@@ -958,6 +1458,18 @@ async function runStoreApp(appId) {
     catch (e) {
       log('error', 'run_app failed:', e && e.message);
       runError = e;
+      // Backend start failures are reported by the status listener above.
+      // These codes fail before a backend exists, so report them here.
+      if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES')) {
+        reportLaunchFailure({
+          appId: appId,
+          phase: 'pre_launch_failure',
+          summary: e.message,
+          exitCode: null,
+          signal: '',
+          logTail: readLogTail(appId)
+        }).catch(function (err) { log('warn', 'launch report failed:', err && err.message); });
+      }
       // The launch failed (missing install/packages, or a backend that could
       // not start), so no app page is open: drop the app context set above and
       // let Help/About and the menu describe the shell again.
@@ -1469,6 +1981,7 @@ function createMenu() {
         },
         {{/has_help_url}}
         {{/is_multi_app}}
+        { type: 'separator' },
         {
           label: 'View Logs',
           click: () => {
@@ -1476,6 +1989,19 @@ function createMenu() {
             shell.openPath(appLogRoot);
           }
         },
+        ...(reportEndpoint() ? [{
+          label: 'Report a Problem…',
+          click: function () {
+            reportLaunchFailure({
+              appId: lastSelectedAppId || 'shinyapps-store',
+              phase: 'manual_report',
+              summary: 'Manual report from the Help menu',
+              exitCode: null,
+              signal: '',
+              logTail: lastSelectedAppId ? readLogTail(lastSelectedAppId) : ''
+            }).catch(function (e) { log('warn', 'launch report failed:', e && e.message); });
+          }
+        }] : []),
         { type: 'separator' },
         {
           label: 'About',
@@ -1610,6 +2136,7 @@ function createMenu() {
         },
         {{/has_help_url}}
         {{/is_multi_app}}
+        { type: 'separator' },
         {
           label: 'View Logs',
           click: () => {
@@ -1617,6 +2144,19 @@ function createMenu() {
             shell.openPath(appLogRoot);
           }
         },
+        ...(reportEndpoint() ? [{
+          label: 'Report a Problem…',
+          click: function () {
+            reportLaunchFailure({
+              appId: lastSelectedAppId || 'shinyapps-store',
+              phase: 'manual_report',
+              summary: 'Manual report from the Help menu',
+              exitCode: null,
+              signal: '',
+              logTail: lastSelectedAppId ? readLogTail(lastSelectedAppId) : ''
+            }).catch(function (e) { log('warn', 'launch report failed:', e && e.message); });
+          }
+        }] : []),
         { type: 'separator' },
         {
           label: 'About',
@@ -2039,10 +2579,34 @@ function createWindow() {
       }
       currentBackend = getBackendForApp('r-shiny', 'bundled');
       openAppLog(opts.appId);
+      var readyAt = 0;
+      var reported = false;
+      var reportLaunch = function (data, phase, summary, detail) {
+        if (reported) return;
+        reported = true;
+        var postReady = readyAt > 0;
+        var finalPhase = (phase === 'server_crashed' || phase === 'error' || phase === 'app_exit_unexpected')
+          ? (postReady ? 'post_ready_failure' : 'pre_ready_failure')
+          : phase;
+        // Let the launcher/lifecycle page settle before opening a modal dialog.
+        setTimeout(function () {
+          reportLaunchFailure({
+            appId: opts.appId,
+            phase: finalPhase,
+            summary: summary || (data && data.message) || 'App failed to start',
+            exitCode: detail && detail.code !== undefined ? detail.code : null,
+            signal: detail && detail.signal,
+            logTail: readLogTail(opts.appId)
+          }).catch(function (e) { log('warn', 'launch report failed:', e && e.message); });
+        }, 800);
+      };
       currentBackend.on('status', function (data) {
         appLogWrite('[' + data.phase + '] ' + (data.message || ''));
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifecycle-status', data);
-        if (data.phase === 'server_ready') serverRunning = true;
+        if (data.phase === 'server_ready') { serverRunning = true; readyAt = Date.now(); }
+        if (data.phase === 'error' || data.phase === 'server_crashed') {
+          reportLaunch(data, data.phase, data.message, data.detail);
+        }
         if (data.phase === 'stopping_server' || data.phase === 'error' || data.phase === 'server_crashed' || data.phase === 'app_exit') serverRunning = false;
       });
       currentBackend.on('output', function (o) { appLogWrite((o && o.stream ? o.stream : 'out') + ': ' + ((o && o.line) || '')); });
@@ -2064,6 +2628,12 @@ function createWindow() {
           // The app ended on its own (not through Back to Launcher or Stop):
           // leave the now-dead page and show the launcher.
           if (d.unexpected) {
+            // A clean exit long after startup is usually the app choosing to
+            // quit; only a short-lived app looks like a failed launch.
+            var uptime = readyAt ? (Date.now() - readyAt) : 0;
+            if (!readyAt || uptime < 60 * 1000) {
+              reportLaunch(d, 'app_exit_unexpected', d.message || 'App exited unexpectedly', null);
+            }
             lastSelectedAppId = null;
             currentAppMeta = null;
             if (currentBackend) { currentBackend.removeAllListeners(); currentBackend = null; }
@@ -3019,6 +3589,11 @@ function createWindow() {
       mainWindow.webContents.openDevTools();
     }
   });
+
+  // Retry reports queued while offline or while the Worker was down.
+  setTimeout(function () {
+    flushPendingReports().catch(function () { /* best effort */ });
+  }, 5000);
 
   {{#tray_enabled}}
   {{#minimize_to_tray}}

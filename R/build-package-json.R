@@ -109,6 +109,7 @@ generate_package_json <- function(app_slug, app_version, backend, config,
 
   # Files to include
   files <- c("main.js", "lifecycle.html", "preload.js",
+             "report.html", "report-preload.js",
              "src/**/*", "assets/**/*", "node_modules/**/*", "backends/**/*",
              "dockerfiles/**/*", "runtime/**/*")
   if (is_multi_app) {
