@@ -188,6 +188,16 @@ function rewriteStateDirs(stateFile, fromRoot, toRoot) {
   }
 }
 
+// Where the shell's bundled R keeps its own library. The store uses this to
+// tell which packages the runtime already provides (base + recommended), so
+// app bundles never shadow them with binaries built against another R.
+function bundledRuntimeLibrary() {
+  let base = __dirname;
+  const unpacked = base.replace('app.asar', 'app.asar.unpacked');
+  if (unpacked !== base && fs.existsSync(unpacked)) base = unpacked;
+  return path.join(base, 'runtime', 'R', 'library');
+}
+
 // Local-only crash capture (opt-in). Uncaught main-process errors are written
 // to <logDir>/crashes/. Nothing is ever uploaded.
 let crashHandlersInstalled = false;
@@ -2715,6 +2725,7 @@ function createWindow() {
       startBackend: storeStartBackend,
       shellVersion: '{{{app_version_js}}}',
       shellRVersion: SHELL_R_VERSION,
+      runtimeLibrary: bundledRuntimeLibrary(),
       getDownloadMirror: function () { return appSettings.downloadMirror || ''; },
       log: function (m) { log('info', '[store]', m); }
     });

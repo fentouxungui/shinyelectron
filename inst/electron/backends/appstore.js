@@ -459,8 +459,48 @@ function assertInside(root, rel) {
   }
 }
 
+function readDescriptionField(dir, field) {
+  try {
+    const text = fs.readFileSync(path.join(dir, 'DESCRIPTION'), 'utf8');
+    const match = text.match(new RegExp('^' + field + ':\\s*(.+)$', 'm'));
+    return match ? match[1].trim() : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+// Packages the bundled R already provides: base and recommended only. The
+// shell's runtime library also holds shiny/zip and their dependencies; those
+// are not included here because app bundles may legitimately pin their own
+// versions of ordinary packages.
+function readRuntimePackages(runtimeLibrary, log) {
+  const out = new Map();
+  if (!runtimeLibrary) return out;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(runtimeLibrary);
+  } catch (e) {
+    if (typeof log === 'function') log(`warn: cannot read runtime library ${runtimeLibrary}: ${e && e.message}`);
+    return out;
+  }
+  for (const name of entries) {
+    const dir = path.join(runtimeLibrary, name);
+    if (!fs.existsSync(path.join(dir, 'DESCRIPTION'))) continue;
+    const priority = readDescriptionField(dir, 'Priority').toLowerCase();
+    if (priority !== 'base' && priority !== 'recommended') continue;
+    out.set(name, {
+      version: readDescriptionField(dir, 'Version'),
+      priority: priority
+    });
+  }
+  if (typeof log === 'function' && out.size) {
+    log(`runtime packages: ${out.size} base/recommended from ${runtimeLibrary}`);
+  }
+  return out;
+}
+
 function createAppStore(options) {
-  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {}, getDownloadMirror = () => '' } = options;
+  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {}, getDownloadMirror = () => '', runtimeLibrary = '' } = options;
   // Data root holds the installed apps + libraries. Defaults to the Electron
   // userData dir for backward compatibility; the shell passes an explicit,
   // user-configurable dataRoot (e.g. %LOCALAPPDATA%\ShinyApps).
@@ -476,6 +516,7 @@ function createAppStore(options) {
   const iconCacheDir = path.join(dataRoot, 'icons');
   const iconIndexPath = path.join(iconCacheDir, 'index.json');
   for (const d of [appsDir, sharedLib, privateRoot, cacheDir, iconCacheDir]) fs.mkdirSync(d, { recursive: true });
+  const runtimePackages = readRuntimePackages(runtimeLibrary, log);
 
   let state = loadState();
   // Older or hand-edited state files may miss a section; every code path below
@@ -508,6 +549,7 @@ function createAppStore(options) {
   // longer exist.
   reconcileInstalled();
   reconcileShared();
+  cleanupRuntimeShadows();
 
   function loadState() {
     try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); }
@@ -567,6 +609,69 @@ function createAppStore(options) {
     }
     try { saveState(); } catch (e) { log('warn: could not save state:', e && e.message); }
     return true;
+  }
+
+  // Remove app-layer copies of packages the bundled R already provides.
+  // KernSmooth/MASS/... built against a different R.framework otherwise shadow
+  // the runtime's own copies at .libPaths() time, which is fatal on macOS.
+  function runtimeShadowRemovable(name, dir) {
+    const pkg = runtimePackages.get(name);
+    if (!pkg) return false;
+    if (!fs.existsSync(path.join(dir, 'DESCRIPTION'))) return false;
+    if (pkg.priority === 'base') return true;
+    const version = readDescriptionField(dir, 'Version');
+    return !!pkg.version && version === pkg.version;
+  }
+
+  function cleanupRuntimeShadows() {
+    if (!runtimePackages.size) return false;
+    let changed = false;
+    for (const name of runtimePackages.keys()) {
+      const dir = path.join(sharedLib, name);
+      if (!runtimeShadowRemovable(name, dir)) continue;
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+        delete state.shared[name];
+        changed = true;
+        log(`removed legacy runtime package ${name} from the shared library`);
+      } catch (e) {
+        log(`warn: could not remove shared runtime package ${name}: ${e && e.message}`);
+      }
+    }
+    for (const id of Object.keys(state.apps)) {
+      for (const name of runtimePackages.keys()) {
+        const dir = path.join(privateRoot, id, name);
+        if (!runtimeShadowRemovable(name, dir)) continue;
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+          changed = true;
+          log(`removed legacy runtime package ${name} from ${id} private library`);
+        } catch (e) {
+          log(`warn: could not remove private runtime package ${name} for ${id}: ${e && e.message}`);
+        }
+      }
+    }
+    // A state record may still name a runtime package whose copies are gone
+    // (e.g. the user deleted lib/KernSmooth by hand). The bundled R is the only
+    // provider left, so stop treating it as an app dependency.
+    for (const id of Object.keys(state.apps)) {
+      const rec = state.apps[id];
+      if (!Array.isArray(rec.packages)) continue;
+      const kept = rec.packages.filter((name) => {
+        if (!runtimePackages.has(name)) return true;
+        if (fs.existsSync(path.join(privateRoot, id, name, 'DESCRIPTION'))) return true;
+        if (fs.existsSync(path.join(sharedLib, name, 'DESCRIPTION'))) return true;
+        return false;
+      });
+      if (kept.length !== rec.packages.length) {
+        rec.packages = kept;
+        changed = true;
+      }
+    }
+    if (changed) {
+      try { saveState(); } catch (e) { log(`warn: could not save state after runtime cleanup: ${e && e.message}`); }
+    }
+    return changed;
   }
 
   // ---- Catalog + icon cache ------------------------------------------------
@@ -813,11 +918,11 @@ function createAppStore(options) {
       staging = null;
 
       onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-      await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+      const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
 
       state.apps[id] = {
         version: manifest.version, platform: plat, dir: finalDir,
-        packages: (manifest.packages || []).map((p) => p.name),
+        packages: linkedPackages,
         source: 'catalog',
         meta: bundleMeta(manifest),
       };
@@ -912,11 +1017,11 @@ function createAppStore(options) {
       staging = null;
 
       onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-      await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+      const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
 
       state.apps[id] = {
         version: manifest.version, platform: plat, dir: finalDir,
-        packages: (manifest.packages || []).map((p) => p.name),
+        packages: linkedPackages,
         source: 'local',
         // Keep where a sideloaded app came from, so the launcher can offer
         // "Copy download link" (a URL install) or "Copy bundle path" later.
@@ -976,11 +1081,37 @@ function createAppStore(options) {
   }
 
   async function reconcilePackages(appId, appDir, packages, onProgress = () => {}) {
+    const keptRuntime = new Set();
     for (const pkg of packages) {
       const src = path.join(appDir, pkg.path);
       const sharedDir = path.join(sharedLib, pkg.name);
       const privateDir = path.join(privateRoot, appId, pkg.name);
       const haveSrc = packagePresent(src);
+      // The bundled R provides base/recommended packages. Never let a bundle
+      // copy shadow them: they may be compiled against another R's libraries.
+      if (runtimePackages.has(pkg.name)) {
+        const sharedRemovable = runtimeShadowRemovable(pkg.name, sharedDir);
+        if (sharedRemovable) {
+          try {
+            await fsp.rm(sharedDir, { recursive: true, force: true });
+            delete state.shared[pkg.name];
+          } catch (e) {
+            log(`warn: could not remove shared runtime package ${pkg.name}: ${e && e.message}`);
+          }
+        }
+        // A different-version — or undeletable — shared/private copy is kept
+        // (see cleanupRuntimeShadows); keep it in state so refcounts stay honest.
+        if (packagePresent(privateDir) || packagePresent(sharedDir)) {
+          keptRuntime.add(pkg.name);
+        }
+        if (!sharedRemovable && packagePresent(sharedDir) && state.shared[pkg.name] &&
+            !state.shared[pkg.name].refs.includes(appId)) {
+          state.shared[pkg.name].refs.push(appId);
+        }
+        try { await fsp.rm(src, { recursive: true, force: true }); } catch (e) { /* best effort */ }
+        log(`using bundled runtime ${pkg.name} for ${appId}`);
+        continue;
+      }
       let shared = state.shared[pkg.name];
       // A record whose folder is gone is worse than no record: the bundle's own
       // copy is deleted below, and a reinstall would skip the copy because the
@@ -1021,6 +1152,9 @@ function createAppStore(options) {
       onProgress({ phase: 'linking', percent: 100, statusText: 'linking ' + pkg.name });
     }
     saveState();
+    return packages
+      .filter((pkg) => !runtimePackages.has(pkg.name) || keptRuntime.has(pkg.name))
+      .map((pkg) => pkg.name);
   }
 
   async function pruneRefs(appId, keepNames) {
@@ -1073,7 +1207,9 @@ function createAppStore(options) {
     // A bundle whose packages are gone cannot start; fail with an actionable
     // message instead of a bare "there is no package called ..." from R.
     const missing = (app.packages || []).filter((name) =>
-      !packagePresent(path.join(privateRoot, id, name)) && !packagePresent(path.join(sharedLib, name)));
+      !runtimePackages.has(name) &&
+      !packagePresent(path.join(privateRoot, id, name)) &&
+      !packagePresent(path.join(sharedLib, name)));
     if (missing.length) {
       const e = new Error(`${id} cannot start: missing package${missing.length > 1 ? 's' : ''} ` +
         `${missing.join(', ')}. Uninstall and install the app again to restore them.`);
