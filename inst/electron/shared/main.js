@@ -861,6 +861,8 @@ async function uninstallShinyApps() {
   }
   app.isQuitting = true;
   if (thorough) storeCommand({ cmd: 'busy_begin', title: 'Uninstalling ' + name + '\u2026' });
+  // Stop in-flight installs before their directories are deleted.
+  try { await cancelAllStoreTasks(); } catch (e) { /* best effort */ }
   try {
     if (thorough) {
       await wipeAllLocalData(function (done, total, label) {
@@ -896,10 +898,16 @@ async function resetLocalData() {
   });
   if (r.response !== 0) return;
   storeCommand({ cmd: 'busy_begin', title: 'Resetting local data\u2026' });
+  // Finish/cancel downloads before their staging and cache directories vanish.
+  try { await cancelAllStoreTasks(); } catch (e) { /* best effort */ }
   const onResetProgress = function (done, total, label) {
     storeCommand({ cmd: 'busy_progress', done: done, total: total, label: label });
   };
   if (appStore) { try { await appStore.resetLocal(onResetProgress); } catch (e) { log('warn', 'reset failed:', e && e.message); } }
+  // resetLocal stopped the apps; close the now-dead app window too.
+  closeAppWindow();
+  currentAppMeta = null;
+  lastSelectedAppId = null;
   closeAllLogs();
   const userData = app.getPath('userData');
   for (const t of ['logs', 'crashes']) {
@@ -940,26 +948,29 @@ let metricsTitleActive = false;
 function metricsEnabled() { return appSettings.metricsOverlay !== false; }
 
 function windowLoading() {
-  try { return !mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading(); }
+  var win = contentWindow();
+  try { return !win || win.isDestroyed() || win.webContents.isLoading(); }
   catch (e) { return true; }
 }
 
 function metricsPageActive() {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  var win = contentWindow();
+  if (!win || win.isDestroyed()) return false;
   try {
-    if (mainWindow.webContents.isLoading()) return false;
-    return /^https?:/i.test(mainWindow.webContents.getURL() || '');
+    if (win.webContents.isLoading()) return false;
+    return /^https?:/i.test(win.webContents.getURL() || '');
   } catch (e) { return false; }
 }
 
 // Remove a CPU/RAM title and hand the window back to the page's own <title>.
 // `force` is for turning the overlay off when the page is not an app page.
 function restorePageTitle(force) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  var win = contentWindow();
+  if (!win || win.isDestroyed()) return;
   if (!metricsTitleActive && !force) return;
   var title = '';
-  try { title = String(mainWindow.webContents.getTitle() || '').trim(); } catch (e) {}
-  mainWindow.setTitle(title || '{{{app_name_js}}}');
+  try { title = String(win.webContents.getTitle() || '').trim(); } catch (e) {}
+  win.setTitle(title || '{{{app_name_js}}}');
   metricsTitleActive = false;
 }
 
@@ -1131,13 +1142,14 @@ function fmtPct(value) { return value < 10 ? value.toFixed(1) : String(Math.roun
 // The app part is dropped when the process tree cannot be read, so a narrow
 // title bar truncates only the least important part.
 function setMetricsTitle(sys, app) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  var win = contentWindow();
+  if (!win || win.isDestroyed()) return;
   var meta = currentAppMeta || (lastSelectedAppId ? appMetaFor(lastSelectedAppId) : null);
   var base = (meta && meta.name) || lastSelectedAppId || '{{{app_name_js}}}';
   var text = base + ' \u2014 CPU ' + Math.round(sys.cpu) + '% \u00b7 RAM ' +
     (sys.memUsed / 1073741824).toFixed(1) + '/' + (sys.memTotal / 1073741824).toFixed(1) + ' GB';
   if (app) text += '  (app ' + fmtPct(app.cpu) + '% \u00b7 ' + fmtGB(app.mem) + ')';
-  mainWindow.setTitle(text);
+  win.setTitle(text);
   metricsTitleActive = true;
 }
 
@@ -1250,56 +1262,213 @@ let lastSelectedAppId = null;
 let sharedShinyliveServer = null;
 let sharedShinylivePort = null;
 let isLauncherVisible = true;   // true while the launcher page is shown (multi-app)
+// Which window owns the menu bar: the launcher (full store menu) or the app
+// window (reduced menu: no Apps/Settings, no User/Developer Guide).
+let menuSurface = 'launcher';
 // Theme mode chosen in the launcher ('system'|'light'|'dark'); mirrored here for the Settings menu.
 let currentThemeMode = 'system';
 let appStore = null;
 // Last loaded URL per catalog app id, so a still-running app can be re-opened.
 var storeAppUrls = {};
-// Single-flight guard: one install/update/uninstall at a time; extra requests
-// are queued, and the running one can be cancelled via AbortController.
-let storeBusy = false;
-let storeController = null;
-const storeQueue = [];
+// Backend object owned by each catalog app. The single currentBackend global
+// is not enough when one app is still exiting as another starts.
+const storeBackends = new Map();
+// The running catalog app lives in its own window; the launcher stays usable
+// in mainWindow. Only one app runs at a time (multi-instance is a later step).
+let appWindow = null;
+let appWindowAppId = null;
+let appWindowClosePromptOpen = false;
+// Set only when the USER closes the app window (not when a failed start or a
+// switch closes it). Used to avoid reporting a user-cancelled start as an error.
+let appWindowClosedByUser = null;
+// Background store tasks: downloads may run concurrently, while appstore.js
+// serializes the shared-library commit. Extra requests wait in a priority
+// queue instead of blocking the whole UI.
+const STORE_TASK_CONCURRENCY = 2;
+let storeTaskSeq = 0;
+const storeTasks = new Map();   // taskId -> task
+// Synchronous guard: an app becomes "running" only after its backend answers,
+// so block a second Launch during that window as well.
+let launchingAppId = null;
 // Quick Run ordering pushed by the launcher (favorites -> usage -> recent).
 let quickRunOrder = [];
 let quickRunFavorites = {};
 
-async function runStoreAction(actionType, storeId) {
-  const sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: storeId }, ev)); };
-  if (storeBusy) {
-    storeQueue.push({ type: actionType, appId: storeId });
-    sendStore({ state: 'queued', statusText: 'queued' });
+function sendStoreStatus(ev) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', ev);
+}
+function taskIsActive(t) { return !!t && (t.state === 'queued' || t.state === 'running'); }
+function storeTaskForApp(appId) {
+  for (const t of storeTasks.values()) {
+    if (taskIsActive(t) && t.appId === appId && t.op !== 'install_bundle') return t;
+  }
+  return null;
+}
+function publicStoreTask(t) {
+  return {
+    taskId: t.taskId,
+    appId: t.appId,
+    op: t.op,
+    state: t.state === 'running' ? 'installing' : t.state,
+    percent: t.percent || 0,
+    statusText: t.statusText || '',
+    step: t.step || '',
+    error: t.error || '',
+    cancelled: !!t.cancelled,
+  };
+}
+function activeStoreTasks() {
+  return Array.from(storeTasks.values()).filter(taskIsActive).sort(function (a, b) { return a.seq - b.seq; });
+}
+function emitTaskProgress(task, pp) {
+  var now = Date.now();
+  if (pp && pp.phase === task.lastPhase && now - task.lastAt < 100) return;
+  task.lastAt = now;
+  task.lastPhase = pp && pp.phase;
+  task.percent = Math.round((pp && pp.percent) || 0);
+  task.statusText = (pp && (pp.statusText || pp.phase)) || '';
+  task.step = (pp && pp.phase) || '';
+  sendStoreStatus({
+    id: task.appId, taskId: task.taskId, state: 'installing', op: task.op,
+    percent: task.percent, statusText: task.statusText, step: task.step,
+  });
+}
+function launchStoreTask(task) {
+  task.state = 'running';
+  sendStoreStatus({ id: task.appId, taskId: task.taskId, state: 'installing', op: task.op, statusText: 'starting…' });
+  task.promise = Promise.resolve()
+    .then(function () { return task.run(task); })
+    .then(
+      function (result) { finishStoreTask(task, null, result); },
+      function (err) { finishStoreTask(task, err || new Error('operation failed')); }
+    );
+  return task.promise;
+}
+function pumpStoreTasks() {
+  var running = 0;
+  storeTasks.forEach(function (t) { if (t.state === 'running') running++; });
+  var slots = STORE_TASK_CONCURRENCY - running;
+  if (slots <= 0) return;
+  var queued = Array.from(storeTasks.values())
+    .filter(function (t) { return t.state === 'queued' && !t.cancelled; })
+    .sort(function (a, b) { return (b.priority - a.priority) || (a.seq - b.seq); });
+  for (var i = 0; i < queued.length && slots > 0; i++) {
+    slots--;
+    launchStoreTask(queued[i]);
+  }
+}
+function finishStoreTask(task, err, result) {
+  if (task.state === 'done' || task.state === 'error' || task.state === 'cancelled') return;
+  var cancelled = !!(err && (err.code === 'CANCELLED' || err.cancelled || task.cancelled));
+  task.cancelled = cancelled;
+  task.state = err ? (cancelled ? 'cancelled' : 'error') : 'done';
+  task.error = err ? ((err && err.message) || String(err)) : '';
+  task.percent = 100;
+  task.statusText = err ? (cancelled ? 'cancelled' : 'failed') : 'done';
+  task.step = err ? ((err && err.step) || task.step || '') : 'done';
+  if (task.op === 'uninstall_app' || task.op === 'update_app' || task.op === 'install_app') {
+    delete storeAppUrls[task.appId];
+  }
+  sendStoreStatus({
+    id: task.appId, taskId: task.taskId, state: err ? 'error' : 'done', op: task.op,
+    error: task.error, cancelled: cancelled, step: task.step,
+    appId: (result && result.id) || '',
+    installedVersion: (result && result.version) || '',
+  });
+  {{#menu_enabled}}
+  try { createMenu(); } catch (e) { /* menu is best-effort */ }
+  {{/menu_enabled}}
+  // Keep the finished task briefly so a concurrent refresh can still show its
+  // final state; the Installing tab only lists queued/running tasks.
+  setTimeout(function () {
+    if (storeTasks.get(task.taskId) === task) storeTasks.delete(task.taskId);
+  }, 60000);
+  pumpStoreTasks();
+}
+function registerStoreTask(opts) {
+  var seq = ++storeTaskSeq;
+  var taskId = opts.taskId ||
+    ((opts.appId === '__bundle__' ? 'bundle' : 'app') + ':' + opts.appId + ':' + seq);
+  var controller = new AbortController();
+  var task = {
+    taskId: taskId, seq: seq, appId: opts.appId, op: opts.op,
+    priority: opts.priority || 1,
+    state: 'queued', percent: 0, statusText: 'queued', step: 'queued',
+    error: '', cancelled: false, controller: controller, signal: controller.signal,
+    run: opts.run, promise: null, lastAt: 0, lastPhase: '',
+  };
+  storeTasks.set(taskId, task);
+  if (opts.immediate) launchStoreTask(task);
+  else {
+    sendStoreStatus({ id: task.appId, taskId: taskId, state: 'queued', op: task.op, statusText: 'queued' });
+    pumpStoreTasks();
+  }
+  return task;
+}
+function cancelStoreTask(taskId) {
+  var task = taskId ? storeTasks.get(taskId) : null;
+  if (!task) {
+    // Backward-compatible cancel: stop the oldest active task.
+    var list = activeStoreTasks();
+    task = list.length ? list[0] : null;
+  }
+  if (!task || !taskIsActive(task)) return false;
+  task.cancelled = true;
+  if (task.state === 'queued') {
+    task.state = 'cancelled';
+    task.error = 'Cancelled';
+    task.statusText = 'cancelled';
+    sendStoreStatus({ id: task.appId, taskId: task.taskId, state: 'error', op: task.op, error: 'Cancelled', cancelled: true, step: 'queued' });
+    storeTasks.delete(task.taskId);
+    pumpStoreTasks();
+  } else {
+    try { task.controller.abort(); } catch (e) { /* already settled */ }
+  }
+  return true;
+}
+async function cancelAllStoreTasks() {
+  var active = activeStoreTasks();
+  var waits = [];
+  active.forEach(function (t) {
+    t.cancelled = true;
+    try { t.controller.abort(); } catch (e) { /* best effort */ }
+    if (t.state === 'queued') {
+      // Queued work has no promise; drop it from the map so store-list cannot
+      // resurrect a stale "Queued" entry after a reset/uninstall.
+      t.state = 'cancelled';
+      t.error = 'Cancelled';
+      storeTasks.delete(t.taskId);
+    } else if (t.promise) {
+      waits.push(t.promise);
+    }
+  });
+  await Promise.allSettled(waits);
+}
+function runStoreAction(actionType, storeId) {
+  if (!appStore) return;
+  if (actionType !== 'install_app' && actionType !== 'update_app' && actionType !== 'uninstall_app') return;
+  if (storeTaskForApp(storeId)) {
+    sendStoreStatus({ id: storeId, state: 'busy', message: 'This app already has an operation in progress.' });
     return;
   }
-  storeBusy = true;
-  storeController = new AbortController();
-  const signal = storeController.signal;
-  var lastProgAt = 0, lastProgPhase = '';
-  const storeProg = function (pp) {
-    var now = Date.now();
-    if (pp.phase === lastProgPhase && now - lastProgAt < 100) return;
-    lastProgAt = now; lastProgPhase = pp.phase;
-    sendStore({ state: 'installing', op: actionType, percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
-  };
-  try {
-    sendStore({ state: 'installing', op: actionType, statusText: 'working...' });
-    if (actionType === 'install_app') await appStore.install(storeId, storeProg, signal);
-    else if (actionType === 'update_app') await appStore.update(storeId, storeProg, signal);
-    else await appStore.uninstall(storeId);
-    if (actionType === 'uninstall_app' || actionType === 'update_app') delete storeAppUrls[storeId];
-    sendStore({ state: 'done', op: actionType });
-  } catch (e) {
-    if (e && e.code === 'CANCELLED') sendStore({ state: 'error', op: actionType, error: 'Cancelled', cancelled: true, step: (e.step || '') });
-    else sendStore({ state: 'error', op: actionType, error: (e && e.message) || String(e), step: (e && e.step) || '' });
-  } finally {
-    storeBusy = false;
-    storeController = null;
-    {{#menu_enabled}}
-    createMenu();
-    {{/menu_enabled}}
-    var next = storeQueue.shift();
-    if (next) runStoreAction(next.type, next.appId);
-  }
+  registerStoreTask({
+    appId: storeId,
+    op: actionType,
+    priority: actionType === 'uninstall_app' ? 3 : 2,
+    run: async function (task) {
+      if (actionType === 'install_app') return appStore.install(storeId, function (pp) { emitTaskProgress(task, pp); }, task.signal);
+      if (actionType === 'update_app') return appStore.update(storeId, function (pp) { emitTaskProgress(task, pp); }, task.signal);
+      // Uninstall: close the running window before the files disappear, then
+      // close/clear again in case the app was only partially running.
+      emitTaskProgress(task, { phase: 'uninstall', percent: 100, statusText: 'removing app files…' });
+      if (appStore.isRunning(storeId) || appWindowAppId === storeId) {
+        await stopStoreApp(storeId);
+      }
+      var uninstalled = await appStore.uninstall(storeId);
+      if (appWindowAppId === storeId) await stopStoreApp(storeId);
+      return uninstalled;
+    },
+  });
 }
 
 // Per-app metadata for Help/About and the in-app update check. Set when an app
@@ -1405,24 +1574,246 @@ function appMetaFor(id) {
   return buildAppMeta(ce, ins && ins.version, man);
 }
 
+// ---- Separate app window ---------------------------------------------------
+// The launcher stays in mainWindow; a running catalog app gets its own window.
+// That keeps the store usable while an app runs, and gives a closed app window
+// an unambiguous "stop this app" meaning (after an unsaved-work prompt).
+function appWindowAlive() {
+  return !!(appWindow && !appWindow.isDestroyed());
+}
+function contentWindow() {
+  return appWindowAlive() ? appWindow : mainWindow;
+}
+function showLauncherWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+// Detach and close the app window without treating it as a user close: the
+// caller has already stopped (or is about to stop) the backend.
+function closeAppWindow() {
+  var win = appWindow;
+  appWindow = null;
+  appWindowAppId = null;
+  metricsTitleActive = false;
+  if (win && !win.isDestroyed()) {
+    try { win.close(); } catch (e) { /* already gone */ }
+  }
+  if (menuSurface === 'app') {
+    menuSurface = 'launcher';
+    {{#menu_enabled}}
+    try { createMenu(); } catch (e) { /* menu is best-effort */ }
+    {{/menu_enabled}}
+  }
+}
+function ensureAppWindow(appId) {
+  if (appWindowAlive()) {
+    if (appWindowAppId === appId) return appWindow;
+    // Never reuse a window belonging to another app: the title, close handler
+    // and Stop menu would all act on the wrong app id.
+    log('warn', 'closing the app window for ' + appWindowAppId + ' before starting ' + appId);
+    closeAppWindow();
+  }
+  var meta = appMetaFor(appId) || {};
+  var win = new BrowserWindow({
+    width: 1200,
+    height: 820,
+    minWidth: 640,
+    minHeight: 480,
+    title: meta.name || '{{{app_name_js}}}',
+    show: false,
+    backgroundColor: '#ffffff',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload.js'),
+      enableRemoteModule: false,
+      webSecurity: true,
+      partition: 'persist:{{app_slug}}'
+    }
+  });
+  appWindow = win;
+  appWindowAppId = appId;
+
+  // The menu bar follows the focused window: the app window gets a reduced
+  // menu (no Apps/Settings, no User/Developer Guide).
+  win.on('focus', function () {
+    if (menuSurface === 'app') return;
+    menuSurface = 'app';
+    {{#menu_enabled}}
+    try { createMenu(); } catch (e) { /* menu is best-effort */ }
+    {{/menu_enabled}}
+  });
+
+  win.webContents.on('console-message', (e, level, message) => {
+    const lvl = (e && e.level !== undefined) ? e.level : level;
+    const msg = (e && e.message !== undefined) ? e.message : message;
+    const isErr = lvl === 'error' || lvl === 'warning' ||
+      (typeof lvl === 'number' && lvl >= 2);
+    log(isErr ? 'error' : 'info', `[app-window] ${msg}`);
+  });
+  win.webContents.on('did-fail-load', (event, code, desc, url) => {
+    log('error', `[app-window] failed to load ${url}: ${desc} (${code})`);
+  });
+  win.webContents.on('render-process-gone', (event, details) => {
+    log('error', `[app-window] renderer gone: ${details && details.reason}`);
+  });
+
+  // Same title policy as before: keep a title the app supplies, otherwise use
+  // the app's catalog name rather than the shell name left by lifecycle.html.
+  win.on('page-title-updated', function (event, title) {
+    var current = appMetaFor(appId) || {};
+    var own = (current.name || appId || '').trim();
+    var next = String(title || '').trim();
+    if (next && next !== '{{{app_name_js}}}') {
+      metricsTitleActive = false;
+      return;
+    }
+    event.preventDefault();
+    if (own && !win.isDestroyed()) {
+      win.setTitle(own);
+      metricsTitleActive = false;
+    }
+  });
+
+  // Ask before closing a running app. The app window is not the launcher, so
+  // this is now the only place the old "unsaved work" confirmation can appear.
+  win.on('close', function (event) {
+    if (isShuttingDown || app.isQuitting) return;
+    if (appWindow !== win) return;   // programmatic close by stopStoreApp
+    var id = appWindowAppId;
+    if (!id) return;
+    var meta = appMetaFor(id) || {};
+    var name = meta.name || id;
+    var hasBackend = !!(appStore && appStore.isRunning(id)) || !!currentBackend;
+    if (!hasBackend) return;
+    event.preventDefault();
+    if (appWindowClosePromptOpen) return;
+    appWindowClosePromptOpen = true;
+    var { dialog } = require('electron');
+    dialog.showMessageBox(win, {
+      type: 'question', noLink: true,
+      title: 'Close ' + name + '?',
+      message: 'Close ' + name + ' and return to the store?',
+      detail: 'Any unsaved work in "' + name + '" will be lost.',
+      buttons: ['Close app', 'Cancel'],
+      defaultId: 1, cancelId: 1
+    }).then(function (res) {
+      appWindowClosePromptOpen = false;
+      if (res.response !== 0) return;
+      appWindowClosedByUser = { id: id, at: Date.now() };
+      stopStoreApp(id).catch(function (e) {
+        log('warn', 'close app failed:', e && e.message);
+      });
+    }).catch(function () {
+      appWindowClosePromptOpen = false;
+    });
+  });
+
+  win.on('closed', function () {
+    // A programmatic close (or a replacement window) already detached this
+    // window; do not clobber the new one.
+    if (appWindow !== win) return;
+    appWindowClosePromptOpen = false;
+    var id = appWindowAppId;
+    appWindow = null;
+    metricsTitleActive = false;
+    if (isShuttingDown || app.isQuitting) { appWindowAppId = null; return; }
+    // Closing the app window stops its app. A user close has already been
+    // confirmed above; this also covers a window closed while it was still
+    // starting (stopStoreApp handles the backend with no store handle yet).
+    if (id) {
+      stopStoreApp(id).catch(function (e) {
+        log('warn', 'stop after app window close failed:', e && e.message);
+      }).then(function () {
+        // Report after the stop settles, otherwise the refresh can still see
+        // the app as running and leave a stale Running card.
+        sendStoreStatus({ id: id, state: 'done', op: 'stop_app' });
+      });
+    } else {
+      appWindowAppId = null;
+    }
+    menuSurface = 'launcher';
+    {{#menu_enabled}}
+    try { createMenu(); } catch (e) { /* menu is best-effort */ }
+    {{/menu_enabled}}
+    showLauncherWindow();
+  });
+
+  return win;
+}
+
 // Shiny apps commonly ship no <title>, so after navigation the window keeps
 // whatever title the previous page (lifecycle/launcher) set, i.e. the shell
 // name. Title it with the running app's name instead; a title the app sets
 // itself still wins. `force` sets the name even when the window currently
 // carries a title of our own (the CPU/RAM suffix) to drop it.
 function setWindowTitleForApp(appId, force) {
-  if (!mainWindow || mainWindow.isDestroyed() || !appId) return;
+  var win = appWindowAlive() ? appWindow : null;
+  if (!win || !appId) return;
   var meta = appMetaFor(appId);
   var label = ((meta && meta.name) || appId || '').trim();
   if (!label) return;
-  if (force) { mainWindow.setTitle(label); metricsTitleActive = false; return; }
+  if (force) { win.setTitle(label); metricsTitleActive = false; return; }
   var current = '';
-  try { current = String(mainWindow.webContents.getTitle() || '').trim(); } catch (e) {}
+  try { current = String(win.webContents.getTitle() || '').trim(); } catch (e) {}
   var shellName = '{{{app_name_js}}}';
   // Keep a real title the app supplied; replace the shell's name or a bare URL.
   if (!current || current === shellName || /^https?:\/\//i.test(current)) {
-    mainWindow.setTitle(label);
+    win.setTitle(label);
     metricsTitleActive = false;
+  }
+}
+
+// The single catalog app that is currently running, if any.
+function runningStoreAppId() {
+  if (!appStore) return null;
+  try {
+    const st = appStore.getState();
+    const ids = Object.keys((st && st.apps) || {});
+    for (let i = 0; i < ids.length; i++) {
+      if (appStore.isRunning(ids[i])) return ids[i];
+    }
+  } catch (e) { /* state not ready */ }
+  return null;
+}
+
+// Stop a catalog app and close its window. Idempotent; used by Stop, app
+// switching and maintenance flows.
+async function stopStoreApp(appId) {
+  if (!appId) return;
+  var appBackend = storeBackends.get(appId) || null;
+  if (!appBackend && appWindowAppId === appId) appBackend = currentBackend;
+  if (appStore && appStore.isRunning(appId)) {
+    try { await appStore.stop(appId); }
+    catch (e) { log('warn', 'stop ' + appId + ' failed:', e && e.message); }
+    // Drop the stopped backend object, but only if it is still the current one:
+    // another app may have started while this one was exiting. Keeping a dead
+    // backend makes the next start call stop() on it (which can throw before
+    // the new backend is created).
+    if (appBackend && currentBackend === appBackend) currentBackend = null;
+  } else if (appWindowAppId === appId && currentBackend && currentBackend !== sharedShinyliveServer) {
+    // Still starting: appStore has no handle yet. Stop the backend this
+    // window owns and forget any handle that the pending start might add.
+    var b = currentBackend;
+    if (currentBackend === b) currentBackend = null;
+    try { b.removeAllListeners(); await b.stop(); } catch (e) { /* best effort */ }
+    if (appStore) appStore.forget(appId);
+  }
+  storeBackends.delete(appId);
+  delete storeAppUrls[appId];
+  if (appWindowAppId === appId || (currentAppMeta && currentAppMeta.id === appId)) {
+    closeAppWindow();
+  }
+  if (lastSelectedAppId === appId) {
+    lastSelectedAppId = null;
+    currentAppMeta = null;
+    {{#menu_enabled}}
+    try { createMenu(); } catch (e) { /* menu is best-effort */ }
+    {{/menu_enabled}}
   }
 }
 
@@ -1430,12 +1821,24 @@ function setWindowTitleForApp(appId, force) {
 // Shared by the launcher's Run button path and the Apps > Quick Run menu.
 async function runStoreApp(appId) {
   if (!appStore) return;
-  if (storeBusy) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('store-status', { id: appId, state: 'busy', message: 'A store operation is in progress; please wait until it finishes.' });
-    }
+  if (launchingAppId) {
+    sendStoreStatus({ id: appId, state: 'busy', message: 'An app is already starting; please wait.' });
     return;
   }
+  // Only one app runs at a time. The launcher disables the other Run buttons;
+  // this guard also covers Quick Run and any stale UI, and never stops the
+  // running app implicitly.
+  var busyId = runningStoreAppId();
+  if (busyId && busyId !== appId) {
+    var busyMeta = appMetaFor(busyId) || {};
+    sendStoreStatus({
+      id: appId, state: 'busy',
+      message: 'Stop ' + (busyMeta.name || busyId) + ' before running another app.'
+    });
+    return;
+  }
+  launchingAppId = appId;
+  appWindowClosedByUser = null;
   lastSelectedAppId = appId;
   var runError = null;
   try { await appStore.fetchCatalog(); } catch (e) { /* entry may already be cached */ }
@@ -1445,51 +1848,78 @@ async function runStoreApp(appId) {
   {{/menu_enabled}}
   var wasRunning = appStore.isRunning(appId);
   var openUrl = wasRunning ? storeAppUrls[appId] : null;
-  if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.loadURL(openUrl);   // already running: switch back, do not restart
-    setWindowTitleForApp(appId);
+  if (openUrl) {
+    // Already running: show its window instead of restarting the backend.
+    if (appWindowAlive() && appWindowAppId === appId) {
+      appWindow.show();
+      appWindow.focus();
+    } else {
+      var win = ensureAppWindow(appId);
+      win.show();
+      win.loadURL(openUrl).then(function () { setWindowTitleForApp(appId); }).catch(function () {});
+    }
   } else if (wasRunning) {
-    // Running but its address was lost: recover it from the live backend
-    // instead of leaving the launcher on screen.
+    // Running but its address was lost: recover it from the live backend.
     try {
       var live = await appStore.run(appId);
       var liveUrl = (live && live.url) || storeAppUrls[appId];
       if (liveUrl) storeAppUrls[appId] = liveUrl;
-      if (liveUrl && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.loadURL(liveUrl);
-        setWindowTitleForApp(appId);
+      if (liveUrl) {
+        if (!appWindowAlive()) { var recovered = ensureAppWindow(appId); recovered.show(); }
+        appWindow.loadURL(liveUrl).then(function () { setWindowTitleForApp(appId); }).catch(function () {});
       }
     } catch (e) {
       log('error', 'run_app failed:', e && e.message);
       runError = e;
     }
   } else {
-    try { await appStore.run(appId); }
-    catch (e) {
-      log('error', 'run_app failed:', e && e.message);
-      runError = e;
-      // Backend start failures are reported by the status listener above.
-      // These codes fail before a backend exists, so report them here.
-      if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES')) {
-        reportLaunchFailure({
-          appId: appId,
-          phase: 'pre_launch_failure',
-          summary: e.message,
-          exitCode: null,
-          signal: '',
-          logTail: readLogTail(appId)
-        }).catch(function (err) { log('warn', 'launch report failed:', err && err.message); });
+    try {
+      await appStore.run(appId);
+      // The user can close the app window while the backend is still starting.
+      // In that case stop what just started instead of leaving an invisible
+      // "running" app behind.
+      if (!appWindowAlive() || appWindowAppId !== appId) {
+        await stopStoreApp(appId);
       }
-      // The launch failed (missing install/packages, or a backend that could
-      // not start), so no app page is open: drop the app context set above and
-      // let Help/About and the menu describe the shell again.
-      currentAppMeta = null;
-      lastSelectedAppId = null;
-      {{#menu_enabled}}
-      createMenu();
-      {{/menu_enabled}}
+    }
+    catch (e) {
+      // Closing the app window during startup stops the backend and can reject
+      // the pending start; that is not a launch failure the user needs to see.
+      // Never swallow NOT_INSTALLED/MISSING_PACKAGES: appStore.run() throws
+      // them before any app window exists, so "no window" is expected there and
+      // they must stay visible on the card (and in a launch report).
+      var preLaunchError = !!(e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES'));
+      var closedByUser = !!(appWindowClosedByUser && appWindowClosedByUser.id === appId);
+      if (!preLaunchError && closedByUser) {
+        runError = null;
+      } else {
+        log('error', 'run_app failed:', e && e.message);
+        runError = e;
+        // Backend start failures are reported by the status listener above.
+        // These codes fail before a backend exists, so report them here.
+        if (e && (e.code === 'NOT_INSTALLED' || e.code === 'MISSING_PACKAGES')) {
+          reportLaunchFailure({
+            appId: appId,
+            phase: 'pre_launch_failure',
+            summary: e.message,
+            exitCode: null,
+            signal: '',
+            logTail: readLogTail(appId)
+          }).catch(function (err) { log('warn', 'launch report failed:', err && err.message); });
+        }
+        // The launch failed (missing install/packages, or a backend that could
+        // not start), so no app page is open: drop the app context set above and
+        // let Help/About and the menu describe the shell again.
+        closeAppWindow();
+        currentAppMeta = null;
+        lastSelectedAppId = null;
+        {{#menu_enabled}}
+        createMenu();
+        {{/menu_enabled}}
+      }
     }
   }
+  launchingAppId = null;
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (runError) {
       mainWindow.webContents.send('store-status', {
@@ -1497,9 +1927,9 @@ async function runStoreApp(appId) {
         error: (runError && runError.message) || String(runError)
       });
     } else {
-      // Only a successful launch reports "done": reporting it after a failure
-      // would immediately clear the error the card is meant to show.
-      mainWindow.webContents.send('store-status', { id: appId, state: 'done' });
+      // Include op:'run_app' so the launcher refreshes and shows Running
+      // instead of leaving the card on Run / a 0 Running count.
+      mainWindow.webContents.send('store-status', { id: appId, state: 'done', op: 'run_app' });
     }
   }
 }
@@ -1623,7 +2053,10 @@ function createTray() {
 // from an escaped *_js template variable.
 async function showAboutDialog() {
   const { dialog, shell } = require('electron');
-  const meta = currentAppMeta || {};
+  // With the launcher and the app in separate windows, About describes the
+  // window it was invoked from: the app only while its window has focus.
+  const focused = BrowserWindow.getFocusedWindow();
+  const meta = (currentAppMeta && appWindowAlive() && focused === appWindow) ? currentAppMeta : {};
   const name = meta.name || '{{{app_name_js}}}';
   const version = meta.version || '{{{app_version_js}}}';
   const description = meta.description || '{{{app_description_js}}}';
@@ -1671,19 +2104,22 @@ async function showAboutDialog() {
   if (actions[response]) await actions[response]();
 }
 
-  // Return to the launcher: confirm first (unsaved work is discarded), then
-  // wait for the backend to actually exit before showing the launcher.
+  // Close the app window and stop its app, returning to the launcher. Used by
+  // the lifecycle "back" path; the app window's own close button has its own
+  // unsaved-work prompt.
   var leavePromptOpen = false;
   function leaveToLauncher() {
     if (!appsManifest || leavePromptOpen) return;
-    var cur = appsManifest.apps.find(function(a) { return a.id === lastSelectedAppId; });
+    var id = appWindowAppId || lastSelectedAppId;
+    if (!id) { showLauncherWindow(); return; }
+    var cur = appsManifest.apps.find(function(a) { return a.id === id; });
     // Catalog apps are not in the baked suite manifest, so prefer the running
     // app's own metadata over the placeholder lookup.
     var curName = (currentAppMeta && currentAppMeta.name) || (cur && cur.name) || '{{{app_name_js}}}';
 
     leavePromptOpen = true;
     var { dialog } = require('electron');
-    dialog.showMessageBox(mainWindow, {
+    dialog.showMessageBox(appWindowAlive() ? appWindow : mainWindow, {
       type: 'question',
       buttons: ['Leave app', 'Cancel'],
       defaultId: 1, cancelId: 1, noLink: true,
@@ -1693,24 +2129,7 @@ async function showAboutDialog() {
     }).then(function(res) {
       leavePromptOpen = false;
       if (res.response !== 0) return;
-      currentAppMeta = null;
-      if (currentBackend && currentBackend !== sharedShinyliveServer) {
-        var b = currentBackend;
-        currentBackend = null;            // prevent a double stop on a later action
-        var settled = false;
-        var finish = function() {
-          if (settled) return; settled = true;
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
-        };
-        var fallback = setTimeout(function() { b.removeAllListeners(); finish(); }, {{shutdown_timeout}});
-        b.on('status', function(d) {
-          if (d && d.phase === 'app_exit') { clearTimeout(fallback); b.removeAllListeners(); finish(); }
-        });
-        b.stop();
-      } else {
-        currentBackend = null;
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
-      }
+      stopStoreApp(id).then(showLauncherWindow, function () { showLauncherWindow(); });
     }).catch(function() {
       leavePromptOpen = false;
     });
@@ -1803,10 +2222,11 @@ function toggleMetricsOverlay() {
   if (metricsEnabled()) {
     metricsTick();
   } else if (mainWindow && !mainWindow.isDestroyed()) {
-    // Drop the suffix immediately. On an app page keep the app name; on the
-    // launcher/lifecycle page hand the title back to the page.
+    // Drop the suffix immediately. On an app page keep the app name; on a
+    // non-app page hand the title back to the page.
+    var mwin = contentWindow();
     var onAppPage = false;
-    try { onAppPage = /^https?:/i.test(mainWindow.webContents.getURL() || ''); } catch (e) {}
+    try { onAppPage = !!(mwin && /^https?:/i.test(mwin.webContents.getURL() || '')); } catch (e) {}
     if (onAppPage) {
       setWindowTitleForApp((currentAppMeta && currentAppMeta.id) || lastSelectedAppId || '', true);
     } else {
@@ -1899,7 +2319,8 @@ function menuSignature() {
   var ids = installedAppMenuItems().map(function (it) { return it.id; }).join(',');
   var updates = 0;
   try { updates = appStore ? appStore.checkUpdates().length : 0; } catch (e) { updates = 0; }
-  return (isLauncherVisible ? 'L' : 'A') + '|' + ids + '|' + updates;
+  return (isLauncherVisible ? 'L' : 'A') + '|' + menuSurface + '|' + ids + '|' + updates +
+    '|' + (appWindowAlive() ? (appWindowAppId || 'app') : '');
 }
 function refreshMenuIfChanged() {
   var sig = menuSignature();
@@ -1909,8 +2330,12 @@ function refreshMenuIfChanged() {
 
 function createMenu() {
   const isMac = process.platform === 'darwin';
-  // Multi-app: Help/About and the App menu reflect the running app.
-  const meta = currentAppMeta;
+  // The launcher and the app window share one native menu on Windows/Linux, so
+  // the focused surface decides its contents. Apps/Settings and the User/
+  // Developer guides only belong to the store, not to a running app.
+  const onAppSurface = (menuSurface === 'app');
+  // Help/About reflect the running app only while its window owns the menu.
+  const meta = onAppSurface ? currentAppMeta : null;
   const appTitle = (meta && meta.name) || '{{{app_name_js}}}';
 
   {{#menu_minimal}}
@@ -1942,11 +2367,10 @@ function createMenu() {
       ]
     },
     {{#is_multi_app}}
-    {
+    ...(!onAppSurface ? [{
       label: 'Apps',
       submenu: buildAppsSubmenu()
-    },
-    ...(isLauncherVisible ? [{
+    }, {
       label: 'Settings',
       submenu: buildSettingsSubmenu()
     }] : []),
@@ -1955,6 +2379,7 @@ function createMenu() {
       label: 'Help',
       submenu: [
         {{#is_multi_app}}
+        ...(onAppSurface ? [] : [
         {{#has_user_guide}}
         {
           label: 'User Guide',
@@ -1972,6 +2397,7 @@ function createMenu() {
             await shell.openExternal('{{{help_url_js}}}');
           }
         },
+        ]),
         ...(meta && meta.docs ? [{
           label: 'App Documentation',
           click: async () => {
@@ -2075,12 +2501,12 @@ function createMenu() {
         { role: 'zoomOut' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        // Settings holds this toggle but is hidden while an app runs, so show
+        // Settings holds this toggle but is hidden on the app surface, so show
         // it here only then: the item never appears in two menus at once.
-        ...(isLauncherVisible ? [] : [
+        ...(onAppSurface ? [
           { type: 'separator' },
           { label: (metricsEnabled() ? '✓ ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
-        ])
+        ] : [])
       ]
     },
     {
@@ -2097,11 +2523,10 @@ function createMenu() {
       ]
     },
     {{#is_multi_app}}
-    {
+    ...(!onAppSurface ? [{
       label: 'Apps',
       submenu: buildAppsSubmenu()
-    },
-    ...(isLauncherVisible ? [{
+    }, {
       label: 'Settings',
       submenu: buildSettingsSubmenu()
     }] : []),
@@ -2110,6 +2535,7 @@ function createMenu() {
       label: 'Help',
       submenu: [
         {{#is_multi_app}}
+        ...(onAppSurface ? [] : [
         {{#has_user_guide}}
         {
           label: 'User Guide',
@@ -2127,6 +2553,7 @@ function createMenu() {
             await shell.openExternal('{{{help_url_js}}}');
           }
         },
+        ]),
         ...(meta && meta.docs ? [{
           label: 'App Documentation',
           click: async () => {
@@ -2322,10 +2749,11 @@ function setupAutoUpdater() {
 // every outcome with a dialog.
 async function checkForUpdatesInteractive() {
   const { dialog } = require('electron');
-  // Multi-app: while a catalog app runs, Check for Updates targets that app
-  // (same source of truth as the launcher's Update button); on the launcher
-  // it keeps checking the shell itself via electron-updater.
-  if (currentAppMeta && appStore) {
+  // Multi-app: while the app window is focused, Check for Updates targets that
+  // app (same source of truth as the launcher's Update button); from the
+  // launcher it keeps checking the shell itself via electron-updater.
+  const focused = BrowserWindow.getFocusedWindow();
+  if (currentAppMeta && appStore && appWindowAlive() && focused === appWindow) {
     return checkAppUpdateInteractive();
   }
   const show = (type, message, detail) =>
@@ -2425,27 +2853,13 @@ async function checkAppUpdateInteractive() {
   });
   if (response !== 0) return;
 
-  // Stop the running app and return to the launcher, then update; the launcher
-  // card shows progress and any failure via store-status.
-  if (currentBackend && currentBackend !== sharedShinyliveServer) {
-    const b = currentBackend;
-    currentBackend = null;
-    try { b.removeAllListeners(); await b.stop(); } catch (e) { /* best effort */ }
-  } else {
-    currentBackend = null;
-  }
+  // Stop the running app and close its window, then update through the same
+  // background task pipeline as the launcher's Update button: the card and the
+  // Installing tab show progress and any failure.
+  await stopStoreApp(id);
   currentAppMeta = null;
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
-
-  const sendStore = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: id }, ev)); };
-  const onProg = function (pp) { sendStore({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase }); };
-  try {
-    sendStore({ state: 'installing', statusText: 'working...' });
-    await appStore.update(id, onProg);
-    sendStore({ state: 'done', op: 'update_app' });
-  } catch (err) {
-    sendStore({ state: 'error', error: (err && err.message) || String(err), step: (err && err.step) || '' });
-  }
+  showLauncherWindow();
+  runStoreAction('update_app', id);
 }
 {{/updates_enabled}}
 
@@ -2511,6 +2925,13 @@ function createWindow() {
   mainWindow.on('resize', scheduleSaveWindowState);
   mainWindow.on('move', scheduleSaveWindowState);
   mainWindow.on('close', saveWindowState);
+  mainWindow.on('focus', function () {
+    if (menuSurface === 'launcher') return;
+    menuSurface = 'launcher';
+    {{#menu_enabled}}
+    try { createMenu(); } catch (e) { /* menu is best-effort */ }
+    {{/menu_enabled}}
+  });
 
   // Stream the renderer console (webR / Pyodide / Shiny output and errors, which
   // otherwise surface only in DevTools) into the app log so every log lives in
@@ -2583,11 +3004,21 @@ function createWindow() {
   // --- App store wiring (multi-app) -------------------------------------
   function storeStartBackend(opts) {
     return new Promise(function (resolve, reject) {
-      if (currentBackend && currentBackend !== sharedShinyliveServer) {
-        currentBackend.removeAllListeners();
-        currentBackend.stop();
+      // Never let a stale outgoing backend abort this start: stop() on an
+      // already-stopped process can throw, and that used to reject the whole
+      // start before the new backend was even created.
+      var outgoing = currentBackend;
+      currentBackend = null;
+      if (outgoing && outgoing !== sharedShinyliveServer) {
+        try {
+          outgoing.removeAllListeners();
+          outgoing.stop();
+        } catch (e) {
+          log('warn', 'could not stop outgoing backend:', e && e.message);
+        }
       }
       currentBackend = getBackendForApp('r-shiny', 'bundled');
+      var win = ensureAppWindow(opts.appId);
       openAppLog(opts.appId);
       var readyAt = 0;
       var reported = false;
@@ -2612,7 +3043,7 @@ function createWindow() {
       };
       currentBackend.on('status', function (data) {
         appLogWrite('[' + data.phase + '] ' + (data.message || ''));
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifecycle-status', data);
+        if (appWindow === win && !win.isDestroyed()) win.webContents.send('lifecycle-status', data);
         if (data.phase === 'server_ready') { serverRunning = true; readyAt = Date.now(); }
         if (data.phase === 'error' || data.phase === 'server_crashed') {
           reportLaunch(data, data.phase, data.message, data.detail);
@@ -2635,6 +3066,10 @@ function createWindow() {
           // calling stop(), whose shutdown listener would wait for an app_exit
           // that has already been emitted.
           if (appStore) appStore.forget(opts.appId);
+          storeBackends.delete(opts.appId);
+          // The launcher no longer reloads when an app exits (its window is
+          // separate), so tell the card that the app stopped.
+          sendStoreStatus({ id: opts.appId, state: 'done', op: 'stop_app' });
           // The app ended on its own (not through Back to Launcher or Stop):
           // leave the now-dead page and show the launcher.
           if (d.unexpected) {
@@ -2647,7 +3082,11 @@ function createWindow() {
             lastSelectedAppId = null;
             currentAppMeta = null;
             if (currentBackend) { currentBackend.removeAllListeners(); currentBackend = null; }
-            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+            if (appWindow === win) closeAppWindow();
+            {{#menu_enabled}}
+            try { createMenu(); } catch (e) { /* menu is best-effort */ }
+            {{/menu_enabled}}
+            showLauncherWindow();
           }
         }
         if (d.phase === 'server_crashed') {
@@ -2657,14 +3096,25 @@ function createWindow() {
           closeAppLog();
           delete storeAppUrls[opts.appId];
           if (appStore) appStore.forget(opts.appId);
+          storeBackends.delete(opts.appId);
           lastSelectedAppId = null;
           currentAppMeta = null;
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadFile('launcher.html');
+          sendStoreStatus({ id: opts.appId, state: 'done', op: 'stop_app' });
+          if (appWindow === win) closeAppWindow();
+          {{#menu_enabled}}
+          try { createMenu(); } catch (e) { /* menu is best-effort */ }
+          {{/menu_enabled}}
+          showLauncherWindow();
         }
       });
       lastSelectedAppId = opts.appId;
-      mainWindow.loadFile('lifecycle.html');
+      win.loadFile('lifecycle.html');
+      if (appWindow === win && !win.isDestroyed()) {
+        win.show();
+        win.focus();
+      }
       var b = currentBackend;
+      storeBackends.set(opts.appId, b);
       b.start({
         appPath: opts.appPath,
         port: port,
@@ -2677,9 +3127,14 @@ function createWindow() {
       }).then(function (result) {
         actualPort = result.port;
         storeAppUrls[opts.appId] = 'http://localhost:' + actualPort;
-        mainWindow.loadURL('http://localhost:' + actualPort).then(function () {
-          setWindowTitleForApp(opts.appId);
-        }).catch(function () { /* navigation errors are reported elsewhere */ });
+        // The app window can be closed by the user while the backend starts;
+        // its 'closed' handler stops that backend, so never navigate a dead
+        // (or replaced) window here.
+        if (appWindow === win && !win.isDestroyed()) {
+          win.loadURL('http://localhost:' + actualPort).then(function () {
+            setWindowTitleForApp(opts.appId);
+          }).catch(function () { /* navigation errors are reported elsewhere */ });
+        }
         resolve({
           // The launcher can re-open a still-running app even if its cached
           // address was lost.
@@ -2714,7 +3169,13 @@ function createWindow() {
             });
           }
         });
-      }).catch(reject);
+      }).catch(function (err) {
+        // A pre-start failure leaves no live app page: close the window so the
+        // launcher (which reports the error on the card) is the only window.
+        if (storeBackends.get(opts.appId) === b) storeBackends.delete(opts.appId);
+        if (appWindow === win) closeAppWindow();
+        reject(err);
+      });
     });
   }
 
@@ -2823,7 +3284,13 @@ function createWindow() {
           state: 'installed'
         });
       });
-      return { apps: list, offline: offline };
+      // Background tasks let the launcher render the Installing tab and
+      // restore per-app progress after a reload. Bundles are tracked by their
+      // own status events and are omitted here.
+      const tasks = activeStoreTasks()
+        .filter(function (t) { return t.appId !== '__bundle__'; })
+        .map(publicStoreTask);
+      return { apps: list, offline: offline, tasks: tasks };
     });
   }
 
@@ -2916,20 +3383,16 @@ function createWindow() {
 
   ipcMain.handle('store-cleanup', async () => {
     if (!appStore) return { freed: 0 };
-    if (storeBusy) return { freed: 0, busy: true };
-    storeBusy = true;
+    // Cleanup deletes staging/cache dirs; never run it while a download or
+    // install is using them.
+    if (activeStoreTasks().length) return { freed: 0, busy: true };
     storeCommand({ cmd: 'busy_begin', title: 'Cleaning up\u2026' });
     const onCleanupProgress = function (done, total, label) {
       storeCommand({ cmd: 'busy_progress', done: done, total: total, label: label });
     };
     try { return await appStore.cleanup(onCleanupProgress); }
     catch (e) { log('warn', 'store-cleanup failed:', e && e.message); return { freed: 0, error: String((e && e.message) || e) }; }
-    finally {
-      storeCommand({ cmd: 'busy_done' });
-      storeBusy = false;
-      const nq = storeQueue.shift();
-      if (nq) runStoreAction(nq.type, nq.appId);
-    }
+    finally { storeCommand({ cmd: 'busy_done' }); }
   });
 
   ipcMain.handle('open-data-root', async () => {
@@ -3415,10 +3878,15 @@ function createWindow() {
     if (actionType === 'retry') {
       if (appsManifest) {
         // Multi-app: re-attempt the last selected app, or return to launcher.
-        if (lastSelectedAppId) {
+        // Catalog apps are not in the baked suite manifest, so retry them
+        // through the store launcher instead.
+        var retryBaked = lastSelectedAppId && appsManifest.apps.some(function (a) { return a.id === lastSelectedAppId; });
+        if (lastSelectedAppId && retryBaked) {
           startSelectedApp(lastSelectedAppId);
+        } else if (lastSelectedAppId && appStore) {
+          runStoreApp(lastSelectedAppId);
         } else {
-          mainWindow.loadFile('launcher.html');
+          showLauncherWindow();
         }
       } else {
         mainWindow.loadFile('lifecycle.html');
@@ -3452,7 +3920,7 @@ function createWindow() {
       await runStoreAction(actionType, action.appId);
 
     } else if (actionType === 'cancel_store') {
-      if (storeController) storeController.abort();
+      cancelStoreTask(action.taskId);
 
     } else if (actionType === 'install_bundle') {
       if (!appStore) return;
@@ -3468,63 +3936,43 @@ function createWindow() {
         if (res.canceled || !res.filePaths.length) return;
         bundlePath = res.filePaths[0];
       }
-      const sendBundle = function (ev) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('store-status', Object.assign({ id: '__bundle__' }, ev)); };
-      if (storeBusy) { sendBundle({ state: 'busy', message: 'Another operation is in progress; please wait until it finishes.' }); return; }
-      storeBusy = true;
-      try {
-        sendBundle({ state: 'installing', statusText: 'reading bundle\u2026' });
-        const confirmBundle = async function (m) {
-          const detail = [
-            'Platform: ' + m.platform,
-            m.r_version ? 'Requires R ' + m.r_version : '',
-            m.author ? 'Author: ' + m.author : '',
-            m.license ? 'License: ' + m.license : '',
-            '',
-            'This bundle is NOT from the ShinyApps catalog.',
-            'Install only if you trust its source.'
-          ].filter(Boolean).join('\n');
-          const r = await dialog.showMessageBox(mainWindow, {
-            type: 'warning', noLink: true,
-            title: 'Install app bundle',
-            message: 'Install ' + (m.name || m.id) + ' ' + m.version + '?',
-            detail: detail,
-            buttons: ['Install', 'Cancel'], defaultId: 1, cancelId: 1
-          });
-          return r.response === 0;
-        };
-        let lastProgAt = 0;
-        let lastProgPhase = '';
-        const onProg = function (pp) {
-          const now = Date.now();
-          if (pp.phase === lastProgPhase && now - lastProgAt < 100) return;
-          lastProgAt = now;
-          lastProgPhase = pp.phase;
-          sendBundle({ state: 'installing', percent: Math.round(pp.percent || 0), statusText: pp.statusText || pp.phase, step: pp.phase });
-        };
-        let installed = null;
-        if (bundleUrl) installed = await appStore.installFromUrl(bundleUrl, { onProgress: onProg, confirm: confirmBundle });
-        else installed = await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle });
-        // Include the installed app id so the launcher can drop a stale error
-        // left by an earlier failed catalog install of the same app.
-        sendBundle({
-          state: 'done',
-          op: 'install_bundle',
-          appId: (installed && installed.id) || '',
-          installedVersion: (installed && installed.version) || '',
-        });
-      } catch (e) {
-        if (!(e && e.cancelled)) sendBundle({ state: 'error', error: (e && e.message) || String(e), step: (e && e.step) || '' });
-        // Say so explicitly: 'done' made the launcher report "Bundle installed".
-        else sendBundle({ state: 'cancelled' });
-      } finally {
-        storeBusy = false;
-        // A bundle install also owns storeBusy: run anything that queued behind it.
-        const nextQueued = storeQueue.shift();
-        if (nextQueued) runStoreAction(nextQueued.type, nextQueued.appId);
+      var activeBundle = Array.from(storeTasks.values()).find(function (t) {
+        return taskIsActive(t) && t.op === 'install_bundle';
+      });
+      if (activeBundle) {
+        sendStoreStatus({ id: '__bundle__', state: 'busy', message: 'A bundle install is already in progress; please wait.' });
+        return;
       }
-      {{#menu_enabled}}
-      createMenu();
-      {{/menu_enabled}}
+      // Bundles install immediately (they are user-picked files) but still go
+      // through the task registry for progress and cancellation. Catalog
+      // installs keep running in parallel.
+      registerStoreTask({
+        appId: '__bundle__', op: 'install_bundle', priority: 3, immediate: true,
+        run: async function (task) {
+          const confirmBundle = async function (m) {
+            const detail = [
+              'Platform: ' + m.platform,
+              m.r_version ? 'Requires R ' + m.r_version : '',
+              m.author ? 'Author: ' + m.author : '',
+              m.license ? 'License: ' + m.license : '',
+              '',
+              'This bundle is NOT from the ShinyApps catalog.',
+              'Install only if you trust its source.'
+            ].filter(Boolean).join('\n');
+            const r = await dialog.showMessageBox(mainWindow, {
+              type: 'warning', noLink: true,
+              title: 'Install app bundle',
+              message: 'Install ' + (m.name || m.id) + ' ' + m.version + '?',
+              detail: detail,
+              buttons: ['Install', 'Cancel'], defaultId: 1, cancelId: 1
+            });
+            return r.response === 0;
+          };
+          const onProg = function (pp) { emitTaskProgress(task, pp); };
+          if (bundleUrl) return await appStore.installFromUrl(bundleUrl, { onProgress: onProg, confirm: confirmBundle, signal: task.signal });
+          return await appStore.installFromFile(bundlePath, { onProgress: onProg, confirm: confirmBundle, signal: task.signal });
+        },
+      });
 
     } else if (actionType === 'run_app') {
       await runStoreApp(action.appId);
@@ -3532,21 +3980,22 @@ function createWindow() {
     } else if (actionType === 'open_app') {
       // Re-open a still-running app without restarting it.
       if (!appStore) return;
-      if (storeBusy) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('store-status', { id: action.appId, state: 'busy', message: 'A store operation is in progress; please wait until it finishes.' });
-        }
-        return;
-      }
       lastSelectedAppId = action.appId;
       currentAppMeta = appMetaFor(action.appId);
       {{#menu_enabled}}
       createMenu();
       {{/menu_enabled}}
       var openUrl = storeAppUrls[action.appId];
-      if (openUrl && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.loadURL(openUrl);
-        setWindowTitleForApp(action.appId);
+      if (openUrl) {
+        if (appWindowAlive() && appWindowAppId === action.appId) {
+          appWindow.show();
+          appWindow.focus();
+          setWindowTitleForApp(action.appId);
+        } else {
+          var reopen = ensureAppWindow(action.appId);
+          reopen.show();
+          reopen.loadURL(openUrl).then(function () { setWindowTitleForApp(action.appId); }).catch(function () {});
+        }
       } else {
         await runStoreApp(action.appId);
       }
@@ -3554,18 +4003,14 @@ function createWindow() {
     } else if (actionType === 'stop_app') {
       if (!appStore) return;
       try {
-        await appStore.stop(action.appId);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('store-status', { id: action.appId, state: 'done', op: 'stop_app' });
-        }
+        await stopStoreApp(action.appId);
+        sendStoreStatus({ id: action.appId, state: 'done', op: 'stop_app' });
       } catch (e) {
         log('error', 'stop_app failed:', e && e.message);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('store-status', {
-            id: action.appId, state: 'error', op: 'stop_app',
-            error: (e && e.message) || String(e)
-          });
-        }
+        sendStoreStatus({
+          id: action.appId, state: 'error', op: 'stop_app',
+          error: (e && e.message) || String(e)
+        });
       }
     }
     } catch (err) {
@@ -3833,6 +4278,8 @@ app.on('before-quit', () => {
 {{/tray_enabled}}
 
 app.on('before-quit', () => {
+  // Quitting must not trigger the per-window "unsaved work" prompt.
+  app.isQuitting = true;
   stopMetrics();
   if (currentBackend) currentBackend.stop();
   // The shared shinylive server is stopped ONLY here, at quit.

@@ -557,6 +557,19 @@ function createAppStore(options) {
   }
   function saveState() { fs.writeFileSync(statePath, JSON.stringify(state, null, 2)); }
 
+  // Installs may download concurrently, but the shared R library and state.json
+  // are global: two workers linking packages at the same time could copy into
+  // the same shared/<pkg> directory. Serialize the commit phase (rename +
+  // linking + state write) so parallel downloads stay fast while the shared
+  // state changes one job at a time. The lock is a simple promise chain; it is
+  // not re-entrant, so callers must not nest it.
+  let commitChain = Promise.resolve();
+  function withCommitLock(fn) {
+    const run = commitChain.then(fn, fn);
+    commitChain = run.then(function () {}, function () {});
+    return run;
+  }
+
   // An install record is only meaningful while its files are still on disk.
   // A record left behind by a partial uninstall, or by a folder deleted by
   // hand, would otherwise be listed by the launcher and fail to start.
@@ -838,6 +851,7 @@ function createAppStore(options) {
     let staging = null;
     let finalDir = null;
     let committed = false;
+    let touchedFinalDir = false;   // did this job delete/create finalDir?
     // Need room for the archive plus its unpacked contents (small margin).
     const free = await freeBytes(cacheDir);
     const need = (art.size || 0) * 3;
@@ -912,32 +926,42 @@ function createAppStore(options) {
       const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
       if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
       finalDir = path.join(appsDir, id, manifest.version);
-      await fsp.mkdir(path.dirname(finalDir), { recursive: true });
-      await fsp.rm(finalDir, { recursive: true, force: true });
-      await fsp.rename(staging, finalDir);
-      staging = null;
 
-      onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-      const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+      // Only the commit touches global state; hold the lock across rename,
+      // shared-library linking and the state write. A queued install can be
+      // cancelled while it waits for the lock.
+      return await withCommitLock(async () => {
+        if (signal && signal.aborted) throw cancelError();
+        await fsp.mkdir(path.dirname(finalDir), { recursive: true });
+        touchedFinalDir = true;
+        await fsp.rm(finalDir, { recursive: true, force: true });
+        await fsp.rename(staging, finalDir);
+        staging = null;
 
-      state.apps[id] = {
-        version: manifest.version, platform: plat, dir: finalDir,
-        packages: linkedPackages,
-        source: 'catalog',
-        meta: bundleMeta(manifest),
-      };
-      saveState();
-      committed = true;
-      log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
-      onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
-      // The cached archive has served its purpose; reclaim the disk.
-      await fsp.rm(zip, { force: true }).catch(() => {});
-      return { id, version: manifest.version };
+        onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
+        const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+
+        state.apps[id] = {
+          version: manifest.version, platform: plat, dir: finalDir,
+          packages: linkedPackages,
+          source: 'catalog',
+          meta: bundleMeta(manifest),
+        };
+        saveState();
+        committed = true;
+        log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
+        onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
+        // The cached archive has served its purpose; reclaim the disk.
+        await fsp.rm(zip, { force: true }).catch(() => {});
+        return { id, version: manifest.version };
+      });
     } catch (e) {
       if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
-      if (finalDir && !committed) {
+      if (finalDir && !committed && touchedFinalDir) {
         // A failed install must not leave a version folder that no record
-        // points at (it would never be reclaimed).
+        // points at (it would never be reclaimed). Never remove a folder this
+        // job did not touch: an abort while waiting for the commit lock must
+        // leave the currently installed version intact.
         await fsp.rm(finalDir, { recursive: true, force: true }).catch(() => {});
         const rec = state.apps[id];
         if (rec && rec.dir && path.resolve(rec.dir) === path.resolve(finalDir)) {
@@ -962,6 +986,7 @@ function createAppStore(options) {
     let installId = null;
     let finalDir = null;
     let committed = false;
+    let touchedFinalDir = false;
     try {
       if (!zipPath || !fs.existsSync(zipPath) || !fs.statSync(zipPath).isFile()) {
         const e = new Error('bundle file not found'); e.step = 'resolve'; throw e;
@@ -1009,40 +1034,46 @@ function createAppStore(options) {
 
       const id = manifest.id;
       installId = id;
-      const old = state.apps[id] || null;
       finalDir = path.join(appsDir, id, manifest.version);
-      await fsp.mkdir(path.dirname(finalDir), { recursive: true });
-      await fsp.rm(finalDir, { recursive: true, force: true });
-      await fsp.rename(staging, finalDir);
-      staging = null;
 
-      onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-      const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+      // See install(): serializes rename + shared-library linking + state.
+      return await withCommitLock(async () => {
+        if (signal && signal.aborted) throw cancelError();
+        const old = state.apps[id] || null;
+        await fsp.mkdir(path.dirname(finalDir), { recursive: true });
+        touchedFinalDir = true;
+        await fsp.rm(finalDir, { recursive: true, force: true });
+        await fsp.rename(staging, finalDir);
+        staging = null;
 
-      state.apps[id] = {
-        version: manifest.version, platform: plat, dir: finalDir,
-        packages: linkedPackages,
-        source: 'local',
-        // Keep where a sideloaded app came from, so the launcher can offer
-        // "Copy download link" (a URL install) or "Copy bundle path" later.
-        sourceUrl: opts.sourceUrl || undefined,
-        sourcePath: opts.sourceUrl ? undefined : (opts.sourcePath || zipPath),
-        sha256: sha,
-        meta: bundleMeta(manifest),
-      };
-      saveState();
-      committed = true;
-      // Reclaim the previous version's files and shared-library refs.
-      await pruneRefs(id, state.apps[id].packages);
-      if (old && old.dir && path.resolve(old.dir) !== path.resolve(finalDir)) {
-        await fsp.rm(old.dir, { recursive: true, force: true }).catch(() => {});
-      }
-      log(`installed local bundle ${id}@${manifest.version}`);
-      onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
-      return { id, version: manifest.version };
+        onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
+        const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+
+        state.apps[id] = {
+          version: manifest.version, platform: plat, dir: finalDir,
+          packages: linkedPackages,
+          source: 'local',
+          // Keep where a sideloaded app came from, so the launcher can offer
+          // "Copy download link" (a URL install) or "Copy bundle path" later.
+          sourceUrl: opts.sourceUrl || undefined,
+          sourcePath: opts.sourceUrl ? undefined : (opts.sourcePath || zipPath),
+          sha256: sha,
+          meta: bundleMeta(manifest),
+        };
+        saveState();
+        committed = true;
+        // Reclaim the previous version's files and shared-library refs.
+        await pruneRefs(id, state.apps[id].packages);
+        if (old && old.dir && path.resolve(old.dir) !== path.resolve(finalDir)) {
+          await fsp.rm(old.dir, { recursive: true, force: true }).catch(() => {});
+        }
+        log(`installed local bundle ${id}@${manifest.version}`);
+        onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
+        return { id, version: manifest.version };
+      });
     } catch (e) {
       if (staging) { await fsp.rm(staging, { recursive: true, force: true }).catch(() => {}); }
-      if (finalDir && !committed) {
+      if (finalDir && !committed && touchedFinalDir) {
         // Roll back the half-installed folder and any record that pointed at it.
         await fsp.rm(finalDir, { recursive: true, force: true }).catch(() => {});
         const rec = installId ? state.apps[installId] : null;
@@ -1173,19 +1204,24 @@ function createAppStore(options) {
   async function uninstall(id) {
     if (!state.apps[id]) return;
     try { await stop(id); } catch (e) { log(`warn: could not stop ${id} before uninstall: ${e && e.message}`); }
-    // Forget the install BEFORE touching the filesystem. On Windows a file can
-    // still be locked (R shutting down, virus scanner), and a failed rm must
-    // not leave a ghost entry that the launcher lists but cannot start.
-    delete state.apps[id];
-    saveState();
-    for (const dir of [path.join(appsDir, id), path.join(privateRoot, id)]) {
-      try { await fsp.rm(dir, { recursive: true, force: true }); }
-      catch (e) { log(`warn: could not remove ${dir}: ${e && e.message}; it will be left for cleanup`); }
-    }
-    try { await pruneRefs(id, []); }
-    catch (e) { log(`warn: could not release shared packages of ${id}: ${e && e.message}`); }
-    saveState();
-    log(`uninstalled ${id}`);
+    // Hold the commit lock while refcounts change, so an install linking
+    // packages at the same time cannot observe a half-updated shared library.
+    await withCommitLock(async () => {
+      if (!state.apps[id]) return;
+      // Forget the install BEFORE touching the filesystem. On Windows a file can
+      // still be locked (R shutting down, virus scanner), and a failed rm must
+      // not leave a ghost entry that the launcher lists but cannot start.
+      delete state.apps[id];
+      saveState();
+      for (const dir of [path.join(appsDir, id), path.join(privateRoot, id)]) {
+        try { await fsp.rm(dir, { recursive: true, force: true }); }
+        catch (e) { log(`warn: could not remove ${dir}: ${e && e.message}; it will be left for cleanup`); }
+      }
+      try { await pruneRefs(id, []); }
+      catch (e) { log(`warn: could not release shared packages of ${id}: ${e && e.message}`); }
+      saveState();
+      log(`uninstalled ${id}`);
+    });
   }
 
   async function run(id) {
@@ -1263,11 +1299,13 @@ function createAppStore(options) {
     await stop(id);
     const oldDir = app.dir;
     await install(id, onProgress, signal);
-    await pruneRefs(id, state.apps[id].packages);
-    // Never delete the freshly installed dir (guards against manifest==catalog mismatch).
-    if (oldDir && path.resolve(oldDir) !== path.resolve(state.apps[id].dir)) {
-      await fsp.rm(oldDir, { recursive: true, force: true });
-    }
+    await withCommitLock(async () => {
+      await pruneRefs(id, state.apps[id].packages);
+      // Never delete the freshly installed dir (guards against manifest==catalog mismatch).
+      if (oldDir && path.resolve(oldDir) !== path.resolve(state.apps[id].dir)) {
+        await fsp.rm(oldDir, { recursive: true, force: true });
+      }
+    });
     log(`updated ${id} -> ${state.apps[id].version}`);
   }
 

@@ -217,6 +217,7 @@
   <div class="appbar" id="appbar">
     <div class="tabs" id="tabs" role="tablist" hidden>
       <button class="tab" type="button" role="tab" data-tab="installed">Installed<span class="count" data-count="installed"></span></button>
+      <button class="tab" type="button" role="tab" data-tab="installing">Installing<span class="count" data-count="installing"></span></button>
       <button class="tab" type="button" role="tab" data-tab="all">All<span class="count" data-count="all"></span></button>
       <button class="tab" type="button" role="tab" data-tab="updates">Updates<span class="count" data-count="updates"></span></button>
       <button class="tab" type="button" role="tab" data-tab="running">Running<span class="count" data-count="running"></span></button>
@@ -269,7 +270,7 @@
     var byId = {};
     var errors = {};
     var view = 'launcher';    // 'launcher' | 'manager'
-    var tab = 'installed';    // 'installed' | 'all' | 'updates' | 'running'
+    var tab = 'installed';    // 'installed' | 'installing' | 'all' | 'updates' | 'running'
     var query = '';
     var selectedTag = '';
     var layout = 'card';      // 'card' | 'list'
@@ -401,12 +402,12 @@
     }
 
     function installedList() { return model.filter(function (a) { return a.installed; }); }
+    function installingList() { return model.filter(function (a) { return a.state === 'installing' || a.state === 'queued'; }); }
     function updatesList() { return model.filter(function (a) { return a.installed && a.updateAvailable; }); }
     function runningList() { return model.filter(function (a) { return a.running; }); }
     var bundleBusy = false;
     var bundleStatus = '';
     var bundlePercent = 0;
-    function anyInstalling() { return bundleBusy || model.some(function (a) { return a.state === 'installing' || a.state === 'queued'; }); }
 
     function sortByName(list) {
       return list.slice().sort(function (a, b) {
@@ -454,6 +455,7 @@
       }
       var base;
       if (tab === 'installed') base = installedList();
+      else if (tab === 'installing') base = installingList();
       else if (tab === 'updates') base = updatesList();
       else if (tab === 'running') base = runningList();
       else base = model.slice();
@@ -464,6 +466,7 @@
     function emptyMessage() {
       if (view === 'launcher') return 'No apps installed yet.';
       if (query || selectedTag) return 'No apps match the current filters.';
+      if (tab === 'installing') return 'No installs in progress. Downloads continue in the background while you browse.';
       if (tab === 'updates') return 'All installed apps are up to date.';
       if (tab === 'running') return 'No apps are running.';
       if (tab === 'installed') return 'No apps installed yet.';
@@ -472,6 +475,7 @@
 
     function countFor(t) {
       if (t === 'installed') return installedList().length;
+      if (t === 'installing') return installingList().length;
       if (t === 'updates') return updatesList().length;
       if (t === 'running') return runningList().length;
       return model.length;
@@ -658,6 +662,17 @@
         st.textContent = app.step ? ((app.step === 'unpacking' && app.statusText) ? app.statusText : stepLabel(app.step, app.statusText)) : (opVerb(app.op) + '\u2026');
         container.appendChild(st);
       }
+      if ((app.state === 'installing' || app.state === 'queued') && window.lifecycle && window.lifecycle.cancelInstall) {
+        var cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'link-btn';
+        cancel.textContent = app.state === 'queued' ? 'Remove from queue' : 'Cancel';
+        cancel.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          window.lifecycle.cancelInstall(app.taskId);
+        });
+        container.appendChild(cancel);
+      }
       var err = errors[app.id];
       if (err) {
         var se = document.createElement('div');
@@ -680,9 +695,9 @@
       b.textContent = '\u2026';
       b.title = 'More actions';
       b.setAttribute('aria-label', 'More actions');
-      // Copy/visit actions are harmless during another install; only an
-      // installed app's menu (which can Uninstall) is frozen while storeBusy.
-      b.disabled = app.state === 'installing' || (app.installed && anyInstalling());
+      // Only this app's own in-flight task freezes its menu. Other installs
+      // run in the background and must not block the whole store.
+      b.disabled = app.state === 'installing' || app.state === 'queued';
       b.addEventListener('click', function (ev) {
         ev.stopPropagation();
         openPopmenu(b, overflowItems(app));
@@ -744,7 +759,11 @@
       var actions = document.createElement('div');
       actions.className = 'card-actions';
       if (!window.lifecycle) return actions;
-      var lock = anyInstalling();   // another app is installing: freeze all actions
+      // Only this app's own task disables its actions; background installs of
+      // other apps no longer freeze the store. While one app runs, every other
+      // app's Run button is disabled: only one app may run at a time.
+      var ownBusy = app.state === 'installing' || app.state === 'queued';
+      var anyRunning = model.some(function (a) { return a.running; });
       if (!app.installed) {
         var reason = installBlockedReason(app);
         var installBtn = makeButton('Install', 'primary', function () {
@@ -758,7 +777,7 @@
               onConfirm: go
             });
           } else { go(); }
-        }, lock || app.state === 'installing' || !!reason || offline);
+        }, ownBusy || !!reason || offline);
         if (reason) {
           installBtn.disabled = true;
           installBtn.title = reason;
@@ -773,20 +792,22 @@
         actions.appendChild(makeButton('Open', 'primary', function () {
           markRecent(app.id);
           window.lifecycle.openApp(app.id);
-        }, lock));
+        }));
         actions.appendChild(makeButton('Stop', '', function () {
           window.lifecycle.stopApp(app.id);
-        }, lock));
+        }));
         actions.appendChild(makeOverflowButton(app));
       } else {
-        actions.appendChild(makeButton('Run', 'primary', function () {
+        var runBtn = makeButton('Run', 'primary', function () {
           markRecent(app.id);
           window.lifecycle.runApp(app.id);
-        }, lock || app.state === 'installing'));
+        }, ownBusy || anyRunning);
+        if (anyRunning) runBtn.title = 'Stop the running app before starting another one';
+        actions.appendChild(runBtn);
         if (app.updateAvailable) {
           var updateBtn = makeButton('Update', '', function () {
             window.lifecycle.updateApp(app.id);
-          }, lock || app.state === 'installing' || offline);
+          }, ownBusy || offline);
           if (offline) updateBtn.title = 'An internet connection is required to update';
           actions.appendChild(updateBtn);
         }
@@ -884,17 +905,25 @@
         banner.textContent = 'Could not refresh the catalog \u2014 showing the last known list. ';
         banner.appendChild(makeButton('Retry', '', function () { refresh(); }));
       }
+      // A compact, non-blocking summary. Downloads no longer freeze the store:
+      // per-app progress and Cancel live on the Installing tab/cards.
       var busybar = document.getElementById('busybar');
-      var busy = anyInstalling();
+      var activeInstalls = installingList();
+      var busy = bundleBusy || activeInstalls.length > 0;
       busybar.hidden = !busy;
       busybar.innerHTML = '';
       if (busy) {
-        var ba = model.filter(function (a) { return a.state === 'installing' || a.state === 'queued'; })[0];
         var btext = document.createElement('span');
         btext.style.flex = '1';
-        btext.textContent = bundleBusy
-          ? ('Installing from bundle \u2014 ' + (bundleStatus || 'please wait') + ' \u2014 do not start other tasks.')
-          : (opVerb(ba && ba.op) + ' ' + ((ba && ba.name) || 'an app') + ' \u2014 please wait before starting other tasks. ');
+        if (bundleBusy) {
+          btext.textContent = 'Installing a local bundle \u2014 ' + (bundleStatus || 'working\u2026');
+        } else if (activeInstalls.length === 1) {
+          var ba = activeInstalls[0];
+          btext.textContent = opVerb(ba.op) + ' ' + (ba.name || 'an app') +
+            ' \u2014 ' + (ba.statusText || 'working\u2026') + ' (you can keep using the store)';
+        } else {
+          btext.textContent = activeInstalls.length + ' installs in progress \u2014 you can keep browsing and running apps.';
+        }
         busybar.appendChild(btext);
         if (bundleBusy && bundlePercent > 0) {
           var bp = document.createElement('div');
@@ -906,9 +935,10 @@
           bp.appendChild(bi);
           busybar.appendChild(bp);
         }
-        if (!bundleBusy) {
-          busybar.appendChild(makeButton('Cancel', 'danger', function () { if (window.lifecycle && window.lifecycle.cancelInstall) window.lifecycle.cancelInstall(); }));
-        }
+        busybar.appendChild(makeButton('View', '', function () {
+          if (view !== 'manager') setView('manager');
+          setTab('installing');
+        }));
       }
 
       if (loading && model.length === 0) {
@@ -1113,7 +1143,8 @@
     function confirmUninstall(app) {
       showConfirm({
         title: 'Uninstall ' + (app.name || app.id) + '?',
-        message: 'This removes the installed copy and its private packages from this computer. You can install it again later.',
+        message: 'This removes the installed copy and its private packages from this computer. You can install it again later.' +
+          (app.running ? ' The running app will be stopped first.' : ''),
         confirmLabel: 'Uninstall',
         danger: true,
         onConfirm: function () { window.lifecycle.uninstallApp(app.id); }
@@ -1403,7 +1434,6 @@
       setFavOnly(!favOnly);
     });
     document.getElementById('install-bundle-btn').addEventListener('click', function () {
-      if (anyInstalling()) { showToast('A store operation is in progress; please wait.', 'error'); return; }
       if (window.lifecycle && window.lifecycle.installFromFile) window.lifecycle.installFromFile();
     });
     document.getElementById('filter-toggle').addEventListener('click', function () {
@@ -1414,7 +1444,6 @@
     window.addEventListener('dragover', function (ev) { ev.preventDefault(); });
     window.addEventListener('drop', function (ev) {
       ev.preventDefault();
-      if (anyInstalling()) { showToast('A store operation is in progress; please wait.', 'error'); return; }
       var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
       if (!f || !window.lifecycle || !window.lifecycle.installFromFile) return;
       var p = window.lifecycle.getPathForFile ? window.lifecycle.getPathForFile(f) : f.path;
@@ -1447,6 +1476,19 @@
         if (!Array.isArray(model)) model = [];
         byId = {};
         model.forEach(function (a) { byId[a.id] = a; });
+        // Restore background task state so the Installing tab is accurate even
+        // after a reload or a refresh triggered by another app finishing.
+        var tasks = (res && !Array.isArray(res) && Array.isArray(res.tasks)) ? res.tasks : [];
+        tasks.forEach(function (t) {
+          var ta = byId[t.appId];
+          if (!ta) return;
+          ta.state = t.state;
+          ta.taskId = t.taskId;
+          ta.op = t.op;
+          ta.percent = t.percent;
+          ta.statusText = t.statusText;
+          ta.step = t.step;
+        });
         try { diskFree = await window.lifecycle.getDiskFree(); } catch (e) { diskFree = null; }
       } catch (e) {
         loadError = (e && e.message) || String(e) || 'unknown error';
@@ -1470,7 +1512,7 @@
       window.lifecycle.onStoreCommand(function (cmd) {
         if (!cmd) return;
         if (cmd.cmd === 'open_manager') {
-          if (cmd.tab && ['installed', 'all', 'updates', 'running'].indexOf(cmd.tab) !== -1) tab = cmd.tab;
+          if (cmd.tab && ['installed', 'installing', 'all', 'updates', 'running'].indexOf(cmd.tab) !== -1) tab = cmd.tab;
           if (view === 'manager') render(); else setView('manager');
         } else if (cmd.cmd === 'install_bundle') {
           if (window.lifecycle.installFromFile) window.lifecycle.installFromFile();
@@ -1532,7 +1574,10 @@
           bundleBusy = false;
           bundleStatus = '';
           bundlePercent = 0;
-          if (ev.state === 'error') {
+          if (ev.state === 'error' && ev.cancelled) {
+            render();
+            showToast('Bundle install cancelled');
+          } else if (ev.state === 'error') {
             render();
             showToast(ev.message || ('Bundle install failed' + (ev.error ? ': ' + ev.error : '')), 'error');
           } else if (ev.state === 'cancelled') {
@@ -1565,6 +1610,7 @@
         if (ev.state === 'done') delete errors[ev.id];
         if (ev.state === 'error' && !ev.cancelled) errors[ev.id] = { step: ev.step || '', message: ev.error || 'install failed', op: ev.op || '' };
         if (app) {
+          if (ev.taskId) app.taskId = ev.taskId;
           if (ev.state) app.state = ev.state;
           if (ev.op) app.op = ev.op;
           if (typeof ev.percent === 'number') app.percent = ev.percent;
@@ -1582,11 +1628,17 @@
               app.installed = true;
               if (app.catalogVersion) app.installedVersion = app.catalogVersion;
               app.updateAvailable = false;
+            } else if (ev.op === 'run_app') {
+              app.running = true;
             } else if (ev.op === 'stop_app') {
               app.running = false;
             }
             app.state = 'installed';
             app.percent = 0;
+            delete app.taskId;
+            delete app.op;
+            delete app.step;
+            delete app.statusText;
           }
           if (ev.state === 'installing' && wasInstalling) updateCardProgress(app);
           else render();

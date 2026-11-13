@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld('lifecycle', {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   openAppLog: (appId) => ipcRenderer.invoke('open-app-log', appId),
   openAppFolder: (appId) => ipcRenderer.invoke('open-app-folder', appId),
-  cancelInstall: () => ipcRenderer.send('lifecycle-action', { type: 'cancel_store' }),
+  cancelInstall: (taskId) => ipcRenderer.send('lifecycle-action', { type: 'cancel_store', taskId }),
   copyDiagnostics: (appId) => ipcRenderer.invoke('copy-diagnostics', appId),
   copyDownloadLink: (appId, mirror) => ipcRenderer.invoke('copy-download-link', appId, !!mirror),
   getUsage: () => ipcRenderer.invoke('store-usage'),
