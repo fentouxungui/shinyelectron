@@ -11,7 +11,7 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, screen, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, Menu, Tray, nativeImage, screen, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -454,7 +454,7 @@ function openReportWindow() {
     log('warn', 'report window failed to load:', code, desc);
     if (reportWindow && !reportWindow.isDestroyed()) reportWindow.show();
   });
-  reportWindow.loadFile(path.join(__dirname, 'report.html'));
+  reportWindow.loadFile(path.join(__dirname, 'report.html'), { query: { theme: currentThemeMode } });
 }
 
 async function postLaunchReport(payload) {
@@ -654,9 +654,9 @@ ipcMain.on('report-action', async (_event, data) => {
   delete payload.includeLog;
   payload.fingerprint = reportFingerprint(payload);
 
-  const reply = (message, kind) => {
+  const reply = (message, kind, extra) => {
     if (reportWindow && !reportWindow.isDestroyed()) {
-      reportWindow.webContents.send('report-status', { message, kind });
+      reportWindow.webContents.send('report-status', Object.assign({ message, kind }, extra || {}));
     }
   };
 
@@ -689,29 +689,11 @@ ipcMain.on('report-action', async (_event, data) => {
       lastReportAt = Date.now();
       log('info', 'launch report sent:', result.id);
       removePendingReport(payload.fingerprint);
-      const email = payload.email || '';
-      closeReportWindow();
-      const { dialog, clipboard } = require('electron');
-      const parent = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : null;
-      const opts = {
-        type: 'info',
-        title: 'Report sent',
-        message: 'Report sent successfully',
-        detail: 'Thank you for helping improve ShinyApps Store!' +
-          '\n\nReport ID: ' + result.id +
-          (result.deduped ? ' (added to an existing report)' : '') +
-          (email ? '\n\nWe will email you at ' + email + ' when there is an update.' : ''),
-        buttons: ['Copy report ID', 'OK'],
-        defaultId: 1,
-        cancelId: 1,
-        noLink: true
-      };
-      try {
-        const answer = parent
-          ? await dialog.showMessageBox(parent, opts)
-          : await dialog.showMessageBox(opts);
-        if (answer.response === 0) clipboard.writeText(String(result.id));
-      } catch (e2) { /* best effort */ }
+      reply('Report sent', 'ok', {
+        reportId: result.id,
+        deduped: !!result.deduped,
+        email: payload.email || ''
+      });
     } catch (e) {
       log('warn', 'launch report failed:', e && e.message);
       const queued = savePendingReport(payload);
@@ -724,6 +706,10 @@ ipcMain.on('report-action', async (_event, data) => {
       );
     }
   }
+});
+
+ipcMain.on('report-copy-text', (_event, text) => {
+  try { require('electron').clipboard.writeText(String(text || '')); } catch (e) { /* best effort */ }
 });
 
 // ---- Uninstall / reset ----------------------------------------------------
@@ -947,18 +933,24 @@ let metricsTitleActive = false;
 
 function metricsEnabled() { return appSettings.metricsOverlay !== false; }
 
-function windowLoading() {
+function contentWebContents() {
+  if (appView && !appView.webContents.isDestroyed()) return appView.webContents;
   var win = contentWindow();
-  try { return !win || win.isDestroyed() || win.webContents.isLoading(); }
+  return (win && !win.webContents.isDestroyed()) ? win.webContents : null;
+}
+
+function windowLoading() {
+  var wc = contentWebContents();
+  try { return !wc || wc.isDestroyed() || wc.isLoading(); }
   catch (e) { return true; }
 }
 
 function metricsPageActive() {
-  var win = contentWindow();
-  if (!win || win.isDestroyed()) return false;
+  var wc = contentWebContents();
+  if (!wc || wc.isDestroyed()) return false;
   try {
-    if (win.webContents.isLoading()) return false;
-    return /^https?:/i.test(win.webContents.getURL() || '');
+    if (wc.isLoading()) return false;
+    return /^https?:/i.test(wc.getURL() || '');
   } catch (e) { return false; }
 }
 
@@ -1277,6 +1269,9 @@ const storeBackends = new Map();
 // in mainWindow. Only one app runs at a time (multi-instance is a later step).
 let appWindow = null;
 let appWindowAppId = null;
+let appView = null;              // WebContentsView holding lifecycle/app content
+const APP_TOOLBAR_HEIGHT = 44;
+let appChromeState = { state: 'starting', message: 'Starting…' };
 let appWindowClosePromptOpen = false;
 // Set only when the USER closes the app window (not when a failed start or a
 // switch closes it). Used to avoid reporting a user-cancelled start as an error.
@@ -1591,12 +1586,35 @@ function showLauncherWindow() {
     mainWindow.focus();
   }
 }
+// Keep the lifecycle splash in the same light/dark world as the store.
+function loadLifecyclePage(win) {
+  if (!win || win.isDestroyed()) return;
+  win.loadFile('lifecycle.html', { query: { theme: currentThemeMode } });
+}
+function loadLifecycleInView(view) {
+  if (!view || view.webContents.isDestroyed()) return;
+  view.webContents.loadFile(path.join(__dirname, 'lifecycle.html'), { query: { theme: currentThemeMode } });
+}
+function layoutAppView() {
+  if (!appWindowAlive() || !appView || appView.webContents.isDestroyed()) return;
+  var size = appWindow.getContentSize();
+  var width = Math.max(0, Math.round(size[0]));
+  var height = Math.max(0, Math.round(size[1] - APP_TOOLBAR_HEIGHT));
+  appView.setBounds({ x: 0, y: APP_TOOLBAR_HEIGHT, width: width, height: height });
+}
+function sendChromeStatus(ev) {
+  if (ev) appChromeState = ev;
+  if (appWindow && !appWindow.isDestroyed()) {
+    try { appWindow.webContents.send('app-chrome-status', appChromeState); } catch (e) { /* best effort */ }
+  }
+}
 // Detach and close the app window without treating it as a user close: the
 // caller has already stopped (or is about to stop) the backend.
 function closeAppWindow() {
   var win = appWindow;
   appWindow = null;
   appWindowAppId = null;
+  appView = null;
   metricsTitleActive = false;
   if (win && !win.isDestroyed()) {
     try { win.close(); } catch (e) { /* already gone */ }
@@ -1624,7 +1642,24 @@ function ensureAppWindow(appId) {
     minHeight: 480,
     title: meta.name || '{{{app_name_js}}}',
     show: false,
+    autoHideMenuBar: true,
     backgroundColor: '#ffffff',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'app-chrome-preload.js'),
+      enableRemoteModule: false,
+      webSecurity: true
+    }
+  });
+  appWindow = win;
+  appWindowAppId = appId;
+
+  // The BrowserWindow only hosts the slim toolbar; lifecycle and the app page
+  // live in a WebContentsView below it. The app's CSP, layout and z-index can
+  // no longer affect the shell controls.
+  var view = new WebContentsView({
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -1635,12 +1670,26 @@ function ensureAppWindow(appId) {
       partition: 'persist:{{app_slug}}'
     }
   });
-  appWindow = win;
-  appWindowAppId = appId;
+  appView = view;
+  win.contentView.addChildView(view);
+  layoutAppView();
+  win.on('show', layoutAppView);
+  win.on('resize', layoutAppView);
+  win.on('maximize', layoutAppView);
+  win.on('unmaximize', layoutAppView);
+  win.on('enter-full-screen', layoutAppView);
+  win.on('leave-full-screen', layoutAppView);
 
-  // The menu bar follows the focused window: the app window gets a reduced
-  // menu (no Apps/Settings, no User/Developer Guide).
+  appChromeState = { state: 'starting', message: 'Starting…' };
+  win.loadFile(path.join(__dirname, 'app-chrome.html'), { query: { theme: currentThemeMode } });
+  win.webContents.on('did-finish-load', function () {
+    if (appWindow === win) sendChromeStatus(appChromeState);
+  });
+
+  // macOS has one application-wide menu bar; Windows/Linux use per-window
+  // menus so focus must not change the launcher's menu.
   win.on('focus', function () {
+    if (process.platform !== 'darwin') return;
     if (menuSurface === 'app') return;
     menuSurface = 'app';
     {{#menu_enabled}}
@@ -1648,36 +1697,51 @@ function ensureAppWindow(appId) {
     {{/menu_enabled}}
   });
 
+  // Stream both surfaces into the app log.
   win.webContents.on('console-message', (e, level, message) => {
     const lvl = (e && e.level !== undefined) ? e.level : level;
     const msg = (e && e.message !== undefined) ? e.message : message;
     const isErr = lvl === 'error' || lvl === 'warning' ||
       (typeof lvl === 'number' && lvl >= 2);
-    log(isErr ? 'error' : 'info', `[app-window] ${msg}`);
+    log(isErr ? 'error' : 'info', `[app-chrome] ${msg}`);
   });
   win.webContents.on('did-fail-load', (event, code, desc, url) => {
-    log('error', `[app-window] failed to load ${url}: ${desc} (${code})`);
+    log('error', `[app-chrome] failed to load ${url}: ${desc} (${code})`);
   });
   win.webContents.on('render-process-gone', (event, details) => {
-    log('error', `[app-window] renderer gone: ${details && details.reason}`);
+    log('error', `[app-chrome] renderer gone: ${details && details.reason}`);
+  });
+  view.webContents.on('console-message', (e, level, message) => {
+    const lvl = (e && e.level !== undefined) ? e.level : level;
+    const msg = (e && e.message !== undefined) ? e.message : message;
+    const isErr = lvl === 'error' || lvl === 'warning' ||
+      (typeof lvl === 'number' && lvl >= 2);
+    log(isErr ? 'error' : 'info', `[app-view] ${msg}`);
+  });
+  view.webContents.on('did-fail-load', (event, code, desc, url) => {
+    log('error', `[app-view] failed to load ${url}: ${desc} (${code})`);
+  });
+  view.webContents.on('render-process-gone', (event, details) => {
+    log('error', `[app-view] renderer gone: ${details && details.reason}`);
   });
 
-  // Same title policy as before: keep a title the app supplies, otherwise use
-  // the app's catalog name rather than the shell name left by lifecycle.html.
-  win.on('page-title-updated', function (event, title) {
+  // The app page owns the window title; the toolbar shell must not.
+  view.webContents.on('page-title-updated', function (event, title) {
     var current = appMetaFor(appId) || {};
     var own = (current.name || appId || '').trim();
     var next = String(title || '').trim();
     if (next && next !== '{{{app_name_js}}}') {
       metricsTitleActive = false;
+      if (!win.isDestroyed()) win.setTitle(next);
       return;
     }
     event.preventDefault();
-    if (own && !win.isDestroyed()) {
+    if (!win.isDestroyed() && own) {
       win.setTitle(own);
       metricsTitleActive = false;
     }
   });
+  win.webContents.on('page-title-updated', function (event) { event.preventDefault(); });
 
   // Ask before closing a running app. The app window is not the launcher, so
   // this is now the only place the old "unsaved work" confirmation can appear.
@@ -1686,8 +1750,8 @@ function ensureAppWindow(appId) {
     if (appWindow !== win) return;   // programmatic close by stopStoreApp
     var id = appWindowAppId;
     if (!id) return;
-    var meta = appMetaFor(id) || {};
-    var name = meta.name || id;
+    var current = appMetaFor(id) || {};
+    var name = current.name || id;
     var hasBackend = !!(appStore && appStore.isRunning(id)) || !!currentBackend;
     if (!hasBackend) return;
     event.preventDefault();
@@ -1720,6 +1784,7 @@ function ensureAppWindow(appId) {
     appWindowClosePromptOpen = false;
     var id = appWindowAppId;
     appWindow = null;
+    appView = null;
     metricsTitleActive = false;
     if (isShuttingDown || app.isQuitting) { appWindowAppId = null; return; }
     // Closing the app window stops its app. A user close has already been
@@ -1743,6 +1808,12 @@ function ensureAppWindow(appId) {
     showLauncherWindow();
   });
 
+  // Windows/Linux give each window its own menu; assign the reduced app menu
+  // now instead of waiting for a focus-driven rebuild (which only macOS needs).
+  {{#menu_enabled}}
+  try { createMenu(); } catch (e) { /* menu is best-effort */ }
+  {{/menu_enabled}}
+
   return win;
 }
 
@@ -1759,7 +1830,8 @@ function setWindowTitleForApp(appId, force) {
   if (!label) return;
   if (force) { win.setTitle(label); metricsTitleActive = false; return; }
   var current = '';
-  try { current = String(win.webContents.getTitle() || '').trim(); } catch (e) {}
+  var wc = contentWebContents();
+  try { current = wc ? String(wc.getTitle() || '').trim() : ''; } catch (e) {}
   var shellName = '{{{app_name_js}}}';
   // Keep a real title the app supplied; replace the shell's name or a bare URL.
   if (!current || current === shellName || /^https?:\/\//i.test(current)) {
@@ -1856,7 +1928,12 @@ async function runStoreApp(appId) {
     } else {
       var win = ensureAppWindow(appId);
       win.show();
-      win.loadURL(openUrl).then(function () { setWindowTitleForApp(appId); }).catch(function () {});
+      if (appView && !appView.webContents.isDestroyed()) {
+        appView.webContents.loadURL(openUrl).then(function () {
+          setWindowTitleForApp(appId);
+          sendChromeStatus({ state: 'running', message: 'Running' });
+        }).catch(function () {});
+      }
     }
   } else if (wasRunning) {
     // Running but its address was lost: recover it from the live backend.
@@ -1866,7 +1943,12 @@ async function runStoreApp(appId) {
       if (liveUrl) storeAppUrls[appId] = liveUrl;
       if (liveUrl) {
         if (!appWindowAlive()) { var recovered = ensureAppWindow(appId); recovered.show(); }
-        appWindow.loadURL(liveUrl).then(function () { setWindowTitleForApp(appId); }).catch(function () {});
+        if (appView && !appView.webContents.isDestroyed()) {
+          appView.webContents.loadURL(liveUrl).then(function () {
+            setWindowTitleForApp(appId);
+            sendChromeStatus({ state: 'running', message: 'Running' });
+          }).catch(function () {});
+        }
       }
     } catch (e) {
       log('error', 'run_app failed:', e && e.message);
@@ -2185,7 +2267,7 @@ function buildAppsSubmenu() {
     var updates = 0;
     try { updates = appStore ? appStore.checkUpdates().length : 0; } catch (e) { updates = 0; }
     sub.push({
-      label: 'Manage Apps\u2026' + (updates ? '  (' + updates + (updates > 1 ? ' updates' : ' update') + ')' : ''),
+      label: 'My Apps\u2026' + (updates ? '  (' + updates + (updates > 1 ? ' updates' : ' update') + ')' : ''),
       accelerator: 'CmdOrCtrl+Shift+M',
       click: function () { openManagerFromMenu(updates ? 'updates' : 'installed'); }
     });
@@ -2224,59 +2306,15 @@ function toggleMetricsOverlay() {
   } else if (mainWindow && !mainWindow.isDestroyed()) {
     // Drop the suffix immediately. On an app page keep the app name; on a
     // non-app page hand the title back to the page.
-    var mwin = contentWindow();
+    var wc = contentWebContents();
     var onAppPage = false;
-    try { onAppPage = !!(mwin && /^https?:/i.test(mwin.webContents.getURL() || '')); } catch (e) {}
+    try { onAppPage = !!(wc && /^https?:/i.test(wc.getURL() || '')); } catch (e) {}
     if (onAppPage) {
       setWindowTitleForApp((currentAppMeta && currentAppMeta.id) || lastSelectedAppId || '', true);
     } else {
       restorePageTitle(true);
     }
   }
-}
-
-function buildSettingsSubmenu() {
-  var sub = [];
-  sub.push({ label: 'Catalog\u2026', click: function () { storeCommand({ cmd: 'catalog' }); } });
-  sub.push({ label: 'Download Mirror\u2026', click: function () { storeCommand({ cmd: 'mirror' }); } });
-  sub.push({ label: 'App Data Location\u2026', click: function () { storeCommand({ cmd: 'data_root' }); } });
-  sub.push({ label: 'Storage\u2026', click: function () { storeCommand({ cmd: 'storage' }); } });
-  sub.push({ type: 'separator' });
-  sub.push({
-    label: 'Theme',
-    submenu: [
-      { label: 'System', type: 'radio', checked: currentThemeMode === 'system', click: function () { storeCommand({ cmd: 'set_theme', theme: 'system' }); } },
-      { label: 'Light', type: 'radio', checked: currentThemeMode === 'light', click: function () { storeCommand({ cmd: 'set_theme', theme: 'light' }); } },
-      { label: 'Dark', type: 'radio', checked: currentThemeMode === 'dark', click: function () { storeCommand({ cmd: 'set_theme', theme: 'dark' }); } }
-    ]
-  });
-  sub.push({
-    label: 'Close Button',
-    submenu: [
-      { label: 'Ask Every Time', type: 'radio', checked: !appSettings.launcherCloseAction, click: function () { setLauncherCloseAction(''); } },
-      { label: 'Minimize to Tray', type: 'radio', checked: appSettings.launcherCloseAction === 'tray', click: function () { setLauncherCloseAction('tray'); } },
-      { label: 'Quit', type: 'radio', checked: appSettings.launcherCloseAction === 'quit', click: function () { setLauncherCloseAction('quit'); } }
-    ]
-  });
-  // A plain item with a leading check mark keeps the whole Settings submenu from
-  // reserving Windows' check-mark gutter (which would indent every item).
-  sub.push({
-    label: (metricsEnabled() ? '\u2713 ' : '') + 'Show CPU/RAM in Title Bar',
-    click: toggleMetricsOverlay
-  });
-  sub.push({
-    label: (appSettings.crashReporting ? '\u2713 ' : '') + 'Save Crash Reports Locally',
-    click: function () {
-      appSettings.crashReporting = !appSettings.crashReporting;
-      saveSettings();
-      if (appSettings.crashReporting) installCrashHandlers();
-      createMenu();
-    }
-  });
-  sub.push({ type: 'separator' });
-  sub.push({ label: 'Reset Local Data\u2026', click: function () { resetLocalData().catch(function (e) { log('error', 'reset failed:', e && e.message); }); } });
-  sub.push({ label: 'Uninstall ' + shellDisplayName() + '\u2026', click: function () { uninstallShinyApps().catch(function (e) { log('error', 'uninstall failed:', e && e.message); }); } });
-  return sub;
 }
 
 // Open the launcher's manager on a given tab (deep link from the Apps menu).
@@ -2330,10 +2368,7 @@ function refreshMenuIfChanged() {
 
 function createMenu() {
   const isMac = process.platform === 'darwin';
-  // The launcher and the app window share one native menu on Windows/Linux, so
-  // the focused surface decides its contents. Apps/Settings and the User/
-  // Developer guides only belong to the store, not to a running app.
-  const onAppSurface = (menuSurface === 'app');
+  function buildMenuFor(onAppSurface) {
   // Help/About reflect the running app only while its window owns the menu.
   const meta = onAppSurface ? currentAppMeta : null;
   const appTitle = (meta && meta.name) || '{{{app_name_js}}}';
@@ -2370,9 +2405,6 @@ function createMenu() {
     ...(!onAppSurface ? [{
       label: 'Apps',
       submenu: buildAppsSubmenu()
-    }, {
-      label: 'Settings',
-      submenu: buildSettingsSubmenu()
     }] : []),
     {{/is_multi_app}}
     {
@@ -2490,8 +2522,16 @@ function createMenu() {
     {
       label: 'View',
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
+        ...(onAppSurface ? [{
+          label: 'Reload App',
+          click: function () { if (appView && !appView.webContents.isDestroyed()) appView.webContents.reload(); }
+        }, {
+          label: 'Reload App (ignore cache)',
+          click: function () { if (appView && !appView.webContents.isDestroyed()) appView.webContents.reloadIgnoringCache(); }
+        }] : [
+          { role: 'reload' },
+          { role: 'forceReload' }
+        ]),
         {{#show_dev_tools}}
         { role: 'toggleDevTools' },
         {{/show_dev_tools}}
@@ -2501,12 +2541,8 @@ function createMenu() {
         { role: 'zoomOut' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        // Settings holds this toggle but is hidden on the app surface, so show
-        // it here only then: the item never appears in two menus at once.
-        ...(onAppSurface ? [
-          { type: 'separator' },
-          { label: (metricsEnabled() ? '✓ ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
-        ] : [])
+        { type: 'separator' },
+        { label: (metricsEnabled() ? '✓ ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
       ]
     },
     {
@@ -2526,9 +2562,6 @@ function createMenu() {
     ...(!onAppSurface ? [{
       label: 'Apps',
       submenu: buildAppsSubmenu()
-    }, {
-      label: 'Settings',
-      submenu: buildSettingsSubmenu()
     }] : []),
     {{/is_multi_app}}
     {
@@ -2607,11 +2640,21 @@ function createMenu() {
   ];
   {{/menu_minimal}}
 
-  // The Apps menu is always present for multi-app builds; buildAppsSubmenu()
-  // decides its contents (Quick Run / Manage Apps on the launcher, Back to
-  // Launcher while an app runs).
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
+  return Menu.buildFromTemplate(template);
+  }
+
+  const launcherMenu = buildMenuFor(false);
+  const appMenu = buildMenuFor(true);
+  if (isMac) {
+    // macOS has one application-wide menu bar; it follows the focused window.
+    Menu.setApplicationMenu(menuSurface === 'app' ? appMenu : launcherMenu);
+  } else {
+    // Windows/Linux can give each window its own menu: the launcher keeps the
+    // store menu, while the app window gets the reduced menu.
+    Menu.setApplicationMenu(launcherMenu);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setMenu(launcherMenu);
+    if (appWindowAlive()) appWindow.setMenu(appMenu);
+  }
   lastMenuSig = menuSignature();
 }
 {{/menu_enabled}}
@@ -2926,6 +2969,7 @@ function createWindow() {
   mainWindow.on('move', scheduleSaveWindowState);
   mainWindow.on('close', saveWindowState);
   mainWindow.on('focus', function () {
+    if (process.platform !== 'darwin') return;
     if (menuSurface === 'launcher') return;
     menuSurface = 'launcher';
     {{#menu_enabled}}
@@ -3019,7 +3063,12 @@ function createWindow() {
       }
       currentBackend = getBackendForApp('r-shiny', 'bundled');
       var win = ensureAppWindow(opts.appId);
+      var view = appView;
       openAppLog(opts.appId);
+      sendChromeStatus({
+        state: 'starting',
+        message: 'Starting ' + ((appMetaFor(opts.appId) || {}).name || opts.appId) + '…'
+      });
       var readyAt = 0;
       var reported = false;
       var reportLaunch = function (data, phase, summary, detail) {
@@ -3043,7 +3092,22 @@ function createWindow() {
       };
       currentBackend.on('status', function (data) {
         appLogWrite('[' + data.phase + '] ' + (data.message || ''));
-        if (appWindow === win && !win.isDestroyed()) win.webContents.send('lifecycle-status', data);
+        if (appWindow === win && appView === view && view && !view.webContents.isDestroyed()) {
+          view.webContents.send('lifecycle-status', data);
+        }
+        if (appWindow === win) {
+          if (data.phase === 'server_ready') {
+            sendChromeStatus({ state: 'starting', message: 'Starting app…' });
+          } else if (data.phase === 'stopping_server') {
+            sendChromeStatus({ state: 'stopping', message: 'Stopping…' });
+          } else if (data.phase === 'error' || data.phase === 'server_crashed') {
+            sendChromeStatus({ state: 'error', message: data.message || data.phase });
+          } else if (data.phase === 'app_exit') {
+            sendChromeStatus({ state: 'stopped', message: 'Stopped' });
+          } else {
+            sendChromeStatus({ state: 'starting', message: data.message || data.phase, percent: data.percent });
+          }
+        }
         if (data.phase === 'server_ready') { serverRunning = true; readyAt = Date.now(); }
         if (data.phase === 'error' || data.phase === 'server_crashed') {
           reportLaunch(data, data.phase, data.message, data.detail);
@@ -3069,6 +3133,7 @@ function createWindow() {
           storeBackends.delete(opts.appId);
           // The launcher no longer reloads when an app exits (its window is
           // separate), so tell the card that the app stopped.
+          if (appWindow === win) sendChromeStatus({ state: 'stopped', message: 'Stopped' });
           sendStoreStatus({ id: opts.appId, state: 'done', op: 'stop_app' });
           // The app ended on its own (not through Back to Launcher or Stop):
           // leave the now-dead page and show the launcher.
@@ -3099,6 +3164,7 @@ function createWindow() {
           storeBackends.delete(opts.appId);
           lastSelectedAppId = null;
           currentAppMeta = null;
+          if (appWindow === win) sendChromeStatus({ state: 'error', message: 'App crashed' });
           sendStoreStatus({ id: opts.appId, state: 'done', op: 'stop_app' });
           if (appWindow === win) closeAppWindow();
           {{#menu_enabled}}
@@ -3108,7 +3174,7 @@ function createWindow() {
         }
       });
       lastSelectedAppId = opts.appId;
-      win.loadFile('lifecycle.html');
+      loadLifecycleInView(view);
       if (appWindow === win && !win.isDestroyed()) {
         win.show();
         win.focus();
@@ -3130,9 +3196,11 @@ function createWindow() {
         // The app window can be closed by the user while the backend starts;
         // its 'closed' handler stops that backend, so never navigate a dead
         // (or replaced) window here.
-        if (appWindow === win && !win.isDestroyed()) {
-          win.loadURL('http://localhost:' + actualPort).then(function () {
+        if (appWindow === win && appView === view && view && !view.webContents.isDestroyed()) {
+          sendChromeStatus({ state: 'starting', message: 'Loading app…' });
+          view.webContents.loadURL('http://localhost:' + actualPort).then(function () {
             setWindowTitleForApp(opts.appId);
+            sendChromeStatus({ state: 'running', message: 'Running' });
           }).catch(function () { /* navigation errors are reported elsewhere */ });
         }
         resolve({
@@ -3236,6 +3304,7 @@ function createWindow() {
           icon: (ins && appStore.iconDataUrl(a.id)) || a.icon || '',
           author: a.author || '',
           homepage: a.homepage || a.homepage_url || a.url || '',
+          docs: a.docs || a.documentation || a.help_url || '',
           catalogVersion: a.version,
           installed: !!ins, installedVersion: ins ? ins.version : null,
           updateAvailable: !!ins && cmpVersion(a.version, ins.version) > 0 && platformOk && !incompatible,
@@ -3269,6 +3338,7 @@ function createWindow() {
           icon: (appStore.iconDataUrl(id) || ''),
           author: lm.author || '',
           homepage: lm.homepage || '',
+          docs: '',
           catalogVersion: (lins && lins.version) || null,
           installed: true, installedVersion: (lins && lins.version) || null,
           updateAvailable: false,
@@ -3293,6 +3363,13 @@ function createWindow() {
       return { apps: list, offline: offline, tasks: tasks };
     });
   }
+
+  // The app window's toolbar shell asks for the current app id/name here.
+  ipcMain.handle('app-window-info', () => {
+    var id = appWindowAppId || lastSelectedAppId || '';
+    var meta = id ? (appMetaFor(id) || {}) : {};
+    return { appId: id, name: meta.name || id || '' };
+  });
 
   ipcMain.handle('copy-download-link', async (_event, appId, mirror) => {
     try {
@@ -3415,6 +3492,9 @@ function createWindow() {
     defaultCatalogUrl: DEFAULT_CATALOG_URL,
     downloadMirror: appSettings.downloadMirror || '',
     crashReporting: !!appSettings.crashReporting,
+    metricsOverlay: appSettings.metricsOverlay !== false,
+    launcherCloseAction: appSettings.launcherCloseAction || '',
+    trayEnabled: {{#tray_enabled}}true{{/tray_enabled}}{{^tray_enabled}}false{{/tray_enabled}},
     dataRoot: resolveDataRoot(),
     defaultDataRoot: DEFAULT_DATA_ROOT,
   }));
@@ -3449,6 +3529,32 @@ function createWindow() {
     saveSettings();
     if (appSettings.crashReporting) installCrashHandlers();
     return { ok: true, crashReporting: !!appSettings.crashReporting };
+  });
+
+  ipcMain.handle('set-metrics-overlay', async (_event, on) => {
+    appSettings.metricsOverlay = !!on;
+    saveSettings();
+    {{#menu_enabled}}
+    try { createMenu(); } catch (e) { /* menu is best-effort */ }
+    {{/menu_enabled}}
+    if (appSettings.metricsOverlay) {
+      metricsTick();
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      var wc = contentWebContents();
+      var onAppPage = false;
+      try { onAppPage = !!(wc && /^https?:/i.test(wc.getURL() || '')); } catch (e) {}
+      if (onAppPage) {
+        setWindowTitleForApp((currentAppMeta && currentAppMeta.id) || lastSelectedAppId || '', true);
+      } else {
+        restorePageTitle(true);
+      }
+    }
+    return { ok: true, metricsOverlay: !!appSettings.metricsOverlay };
+  });
+
+  ipcMain.handle('set-launcher-close-action', async (_event, action) => {
+    setLauncherCloseAction(action === 'tray' || action === 'quit' ? action : '');
+    return { ok: true, launcherCloseAction: appSettings.launcherCloseAction || '' };
   });
 
   ipcMain.handle('reset-local-data', async () => {
@@ -3620,7 +3726,7 @@ function createWindow() {
     mainWindow.loadFile('launcher.html');
   } else {
   // Load lifecycle page
-  mainWindow.loadFile('lifecycle.html');
+  loadLifecyclePage(mainWindow);
   }
 
   // Start backend server
@@ -3778,7 +3884,7 @@ function createWindow() {
     });
 
     // Show lifecycle page during startup
-    mainWindow.loadFile('lifecycle.html');
+    loadLifecyclePage(mainWindow);
 
     // Resolve the app path (ASAR-aware). Prefer the serve descriptor's
     // path/site; fall back to the legacy top-level path for older manifests.
@@ -3836,7 +3942,7 @@ function createWindow() {
       siteRoot = unpackedSite;
     }
 
-    mainWindow.loadFile('lifecycle.html');
+    loadLifecyclePage(mainWindow);
     sharedShinyliveServer = require('./backends/shinylive');
     sharedShinyliveServer.on('status', function(data) {
       log('info', '[shinylive] ' + data.phase + ': ' + (data.message || ''));
@@ -3889,7 +3995,7 @@ function createWindow() {
           showLauncherWindow();
         }
       } else {
-        mainWindow.loadFile('lifecycle.html');
+        loadLifecyclePage(mainWindow);
         backend.start({ appPath, port, config: {{{backend_config_json}}} }).then(({ port: p }) => {
           actualPort = p;
           mainWindow.loadURL(`http://localhost:${actualPort}`);
@@ -3900,6 +4006,16 @@ function createWindow() {
       }
     } else if (actionType === 'quit') {
       app.quit();
+    } else if (actionType === 'report_problem') {
+      var reportAppId = lastSelectedAppId || (currentAppMeta && currentAppMeta.id) || 'shinyapps-store';
+      reportLaunchFailure({
+        appId: reportAppId,
+        phase: 'manual_report',
+        summary: 'Manual report from the lifecycle error screen',
+        exitCode: null,
+        signal: '',
+        logTail: reportAppId !== 'shinyapps-store' ? readLogTail(reportAppId) : ''
+      }).catch(function (e) { log('warn', 'launch report failed:', e && e.message); });
     } else if (actionType === 'install') {
       (currentBackend || backend).emit('install-packages', {
         libPath: action.libPath || 'system'
@@ -3911,6 +4027,9 @@ function createWindow() {
     } else if (actionType === 'select_app') {
       lastSelectedAppId = action.appId;
       startSelectedApp(action.appId);
+
+    } else if (actionType === 'show_store') {
+      showLauncherWindow();
 
     } else if (actionType === 'back_to_launcher') {
       leaveToLauncher();
@@ -3994,7 +4113,12 @@ function createWindow() {
         } else {
           var reopen = ensureAppWindow(action.appId);
           reopen.show();
-          reopen.loadURL(openUrl).then(function () { setWindowTitleForApp(action.appId); }).catch(function () {});
+          if (appView && !appView.webContents.isDestroyed()) {
+            appView.webContents.loadURL(openUrl).then(function () {
+              setWindowTitleForApp(action.appId);
+              sendChromeStatus({ state: 'running', message: 'Running' });
+            }).catch(function () {});
+          }
         }
       } else {
         await runStoreApp(action.appId);
@@ -4176,7 +4300,7 @@ function createWindow() {
               setTimeout(() => app.quit(), 0);
             }
           });
-          mainWindow.loadFile('lifecycle.html');
+          loadLifecyclePage(mainWindow);
         } else if (currentBackend) {
           currentBackend.stop();
         }

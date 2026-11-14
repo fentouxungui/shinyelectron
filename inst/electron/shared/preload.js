@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('lifecycle', {
     ipcRenderer.on('lifecycle-status', (_event, data) => callback(data));
   },
   retry: () => ipcRenderer.send('lifecycle-action', { type: 'retry' }),
+  reportProblem: () => ipcRenderer.send('lifecycle-action', { type: 'report_problem' }),
   quit: () => ipcRenderer.send('lifecycle-action', { type: 'quit' }),
   install: (data) => ipcRenderer.send('lifecycle-action', { type: 'install', ...data }),
   skipInstall: () => ipcRenderer.send('lifecycle-action', { type: 'skip_install' }),
@@ -43,6 +44,8 @@ contextBridge.exposeInMainWorld('lifecycle', {
   setCatalogUrl: (url) => ipcRenderer.invoke('set-catalog-url', url),
   setDownloadMirror: (value) => ipcRenderer.invoke('set-download-mirror', value),
   setCrashReporting: (on) => ipcRenderer.invoke('set-crash-reporting', on),
+  setMetricsOverlay: (on) => ipcRenderer.invoke('set-metrics-overlay', !!on),
+  setLauncherCloseAction: (action) => ipcRenderer.invoke('set-launcher-close-action', action),
   installFromUrl: (url) => ipcRenderer.send('lifecycle-action', { type: 'install_bundle', url }),
   changeDataRoot: () => ipcRenderer.invoke('change-data-root'),
   resetLocalData: () => ipcRenderer.invoke('reset-local-data'),

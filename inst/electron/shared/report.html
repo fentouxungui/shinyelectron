@@ -5,68 +5,145 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
   <title>Report a Problem - {{app_name}}</title>
   <style>
+    :root {
+      color-scheme: light;
+      --canvas: {{brand_background}};
+      --surface: color-mix(in srgb, var(--canvas) 35%, #ffffff 65%);
+      --surface-2: color-mix(in srgb, var(--canvas) 62%, #ffffff 38%);
+      --ink: #191b1c;
+      --ink-2: #3d3f40;
+      --muted: #5f5c56;
+      --line: color-mix(in srgb, var(--ink) 13%, transparent);
+      --line-strong: color-mix(in srgb, var(--ink) 23%, transparent);
+      --accent: {{brand_primary}};
+      --accent-ink: #ffffff;
+      --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--surface));
+      --ok: #1c7147;
+      --danger: #b42318;
+      --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      --font-mono: "Cascadia Code", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+      --r-sm: 7px;
+      --r-md: 10px;
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --canvas: #151617;
+      --surface: #1c1e1f;
+      --surface-2: #222526;
+      --ink: #f1eee7;
+      --ink-2: #cfcbc2;
+      --muted: #a6a198;
+      --line: color-mix(in srgb, var(--ink) 14%, transparent);
+      --line-strong: color-mix(in srgb, var(--ink) 26%, transparent);
+      --accent: color-mix(in srgb, {{brand_primary}} 58%, #ffffff);
+      --accent-ink: #101214;
+      --accent-soft: color-mix(in srgb, var(--accent) 17%, var(--surface));
+      --ok: #6fd39b;
+      --danger: #ff9a91;
+    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      background: #f8fafc;
-      color: #0f172a;
+      font-family: var(--font-ui);
+      font-size: 13.5px;
+      line-height: 1.45;
+      background: var(--canvas);
+      color: var(--ink);
+      text-rendering: optimizeLegibility;
     }
+    ::selection { background: var(--accent-soft); color: var(--ink); }
+    :focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
     .wrap { max-width: 760px; margin: 0 auto; padding: 24px 28px 28px; }
-    h1 { font-size: 20px; margin: 0 0 4px; }
-    .sub { color: #64748b; font-size: 13px; margin-bottom: 18px; }
+    h1 { font-size: 20px; letter-spacing: -.02em; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
     .summary {
-      background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
-      padding: 12px 14px; white-space: pre-wrap; line-height: 1.45;
-      margin-bottom: 16px;
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md);
+      padding: 12px 14px; white-space: pre-wrap; line-height: 1.5; margin-bottom: 16px;
     }
     .meta {
       display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px;
-      font-size: 12px; color: #334155; margin-bottom: 16px;
+      font-size: 12px; color: var(--ink-2); margin-bottom: 16px;
     }
-    .meta b { color: #64748b; font-weight: 500; }
-    .section-title { font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
+    .meta b { color: var(--muted); font-weight: 520; }
+    .section-title { display: block; font-size: 13px; font-weight: 620; margin: 16px 0 6px; }
     label.check {
       display: flex; align-items: center; gap: 8px;
-      font-size: 13px; color: #334155; margin-bottom: 8px;
+      font-size: 13px; color: var(--ink-2); margin-bottom: 8px;
     }
+    label.check input { accent-color: var(--accent); }
     textarea {
       width: 100%; min-height: 90px; resize: vertical;
-      border: 1px solid #cbd5e1; border-radius: 6px;
+      border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+      background: var(--surface); color: var(--ink);
       padding: 10px; font: inherit; font-size: 13px;
     }
-    input.email {
-      width: 100%; border: 1px solid #cbd5e1; border-radius: 6px;
+    input.email, select.select {
+      width: 100%; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+      background: var(--surface); color: var(--ink);
       padding: 8px 10px; font: inherit; font-size: 13px;
     }
-    select.select {
-      width: 100%; border: 1px solid #cbd5e1; border-radius: 6px;
-      padding: 8px 10px; font: inherit; font-size: 13px; background: #fff;
+    textarea:focus, input.email:focus, select.select:focus {
+      border-color: var(--accent); outline: none;
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
     }
     pre {
-      background: #0f172a; color: #e2e8f0; border-radius: 6px;
-      padding: 12px; font-size: 11px; line-height: 1.45;
-      max-height: 180px; overflow: auto; white-space: pre-wrap;
-      word-break: break-word; margin: 0;
+      background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line);
+      border-radius: var(--r-sm); padding: 12px; font-family: var(--font-mono);
+      font-size: 11.5px; line-height: 1.5; max-height: 180px; overflow: auto;
+      white-space: pre-wrap; word-break: break-word; margin: 0;
     }
     details { margin-top: 10px; }
-    summary { cursor: pointer; font-size: 12px; color: #475569; }
-    .buttons {
-      display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;
-    }
+    summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+    summary:hover { color: var(--ink); }
+    .buttons { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 20px; }
     button {
-      border: 0; border-radius: 6px; padding: 8px 16px;
-      font-size: 13px; font-weight: 500; cursor: pointer;
+      min-height: 34px; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+      padding: 7px 16px; font: inherit; font-size: 13px; font-weight: 600;
+      background: var(--surface); color: var(--ink); cursor: pointer;
+      transition: background .12s ease, border-color .12s ease, color .12s ease;
     }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .primary { background: #2563eb; color: #fff; }
-    .secondary { background: #e2e8f0; color: #334155; }
+    button:hover { background: var(--surface-2); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .primary:hover { background: color-mix(in srgb, var(--accent) 88%, #000); border-color: color-mix(in srgb, var(--accent) 88%, #000); }
+    .secondary { background: transparent; color: var(--ink-2); }
+    .secondary:hover { background: var(--surface-2); color: var(--ink); }
+    .success-icon {
+      width: 44px; height: 44px; margin: 8px 0 14px;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, var(--surface));
+      border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--line));
+      border-radius: 50%;
+    }
+    .success-title { margin: 0 0 4px; font-size: 18px; letter-spacing: -.02em; }
+    .success-id {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin: 14px 0 4px; padding: 10px 12px;
+      background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+      font-size: 12px; color: var(--muted);
+    }
+    .success-id code { font-family: var(--font-mono); font-size: 12px; color: var(--ink); }
+    #success .buttons { justify-content: flex-start; margin-top: 14px; }
     .status { margin-top: 12px; font-size: 12px; min-height: 18px; }
-    .status.ok { color: #15803d; }
-    .status.err { color: #b91c1c; }
-    .status.info { color: #475569; }
-    .hint { font-size: 12px; color: #64748b; margin-top: 4px; }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--danger); }
+    .status.info { color: var(--muted); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: .001ms !important; animation-duration: .001ms !important; }
+    }
   </style>
+  <script>
+    (function () {
+      try {
+        var q = new URLSearchParams(location.search).get('theme') || 'system';
+        var eff = q === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : q;
+        document.documentElement.setAttribute('data-theme', eff === 'dark' ? 'dark' : 'light');
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <div class="wrap">
@@ -75,13 +152,14 @@
     <div class="summary" id="summary"></div>
     <div class="meta" id="meta"></div>
 
+    <div id="report-form">
     <div id="app-wrap" style="display:none">
-      <div class="section-title">Affected app</div>
+      <label class="section-title" for="app">Affected app</label>
       <select class="select" id="app"></select>
     </div>
 
     <div id="category-wrap" style="display:none">
-      <div class="section-title">Problem type</div>
+      <label class="section-title" for="category">Problem type</label>
       <select class="select" id="category">
         <option value="other">Other</option>
         <option value="launch_failure">App won't start</option>
@@ -92,12 +170,12 @@
     </div>
 
     <div id="note-wrap" style="display:none">
-      <div class="section-title">What went wrong? (required)</div>
+      <label class="section-title" for="note">What went wrong? (required)</label>
       <textarea id="note" placeholder="Describe the problem you saw. This text becomes the issue summary."></textarea>
       <div class="hint">Sending creates a GitHub issue in the ShinyApps reports repository.</div>
     </div>
 
-    <div class="section-title">Email (optional)</div>
+    <label class="section-title" for="email">Email (optional)</label>
     <input type="email" class="email" id="email" placeholder="you@example.com" autocomplete="email">
     <div class="hint">Only used to let you know when this report is resolved. Stored locally and included in the private report.</div>
 
@@ -116,6 +194,26 @@
       <button class="secondary" id="cancel">Cancel</button>
     </div>
     <div class="status" id="status"></div>
+    </div>
+
+    <div id="success" hidden>
+      <div class="success-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+          <path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <h2 class="success-title">Report sent</h2>
+      <p class="sub" id="success-sub">Thank you for helping improve ShinyApps Store.</p>
+      <div class="success-id">
+        <span>Report ID</span>
+        <code id="success-id">—</code>
+      </div>
+      <div class="buttons">
+        <button class="secondary" id="success-copy">Copy report ID</button>
+        <button class="primary" id="success-close">Close</button>
+      </div>
+      <div class="status" id="success-status"></div>
+    </div>
   </div>
 
   <script>
@@ -136,6 +234,13 @@
       var categoryWrap = document.getElementById('category-wrap');
       var categoryEl = document.getElementById('category');
       var rawEl = document.getElementById('raw');
+      var formEl = document.getElementById('report-form');
+      var successEl = document.getElementById('success');
+      var successIdEl = document.getElementById('success-id');
+      var successSubEl = document.getElementById('success-sub');
+      var successStatusEl = document.getElementById('success-status');
+      var successCopyEl = document.getElementById('success-copy');
+      var successCloseEl = document.getElementById('success-close');
 
       if (!window.reportApi) {
         statusEl.textContent = 'Report bridge unavailable.';
@@ -318,13 +423,40 @@
 
       categoryEl.addEventListener('change', refreshRaw);
 
+      successCopyEl.addEventListener('click', function () {
+        var id = successIdEl.textContent;
+        if (!id || id === '—' || !window.reportApi.copyText) return;
+        window.reportApi.copyText(id);
+        successStatusEl.textContent = 'Report ID copied.';
+        successStatusEl.className = 'status ok';
+      });
+      successCloseEl.addEventListener('click', function () {
+        window.reportApi.action('cancel');
+      });
+
       window.reportApi.onStatus(function (data) {
-        setStatus(data.message || '', data.kind || '');
         if (data.kind === 'ok') {
           sent = true;
           sendEl.disabled = true;
           cancelEl.textContent = 'Close';
-        } else if (data.kind === 'err') {
+          formEl.hidden = true;
+          successEl.hidden = false;
+          document.getElementById('title').textContent = 'Report sent';
+          document.getElementById('sub').textContent = '';
+          successIdEl.textContent = data.reportId || '—';
+          successCopyEl.disabled = !data.reportId;
+          var sub = data.deduped
+            ? 'Added to an existing report.'
+            : 'Thank you for helping improve ShinyApps Store.';
+          if (data.email) sub += ' We will email you at ' + data.email + ' when there is an update.';
+          successSubEl.textContent = sub;
+          successStatusEl.textContent = '';
+          successStatusEl.className = 'status';
+          successCloseEl.focus();
+          return;
+        }
+        setStatus(data.message || '', data.kind || '');
+        if (data.kind === 'err') {
           sendEl.disabled = false;
           updateSend();
         }
