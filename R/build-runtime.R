@@ -90,6 +90,11 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
   # cached copy, see below), not system R. This ensures binary packages are
   # linked against matching dylibs AND are installed into the exact library
   # the app will load from at runtime.
+  #
+  # The sibling library may be absent when there are no packages to install;
+  # define the path here so the macOS re-signing step can check it.
+  lib_path <- fs::path(runtime_dest, "library")
+
   if (length(direct_pkgs) > 0) {
 
     # Install into a SIBLING library directory (runtime_dest/library/),
@@ -98,7 +103,6 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
     # validation at dyn.load() time, causing segfaults on unsigned
     # CRAN binaries. The sibling-library layout avoids that; the
     # Electron runtime (native-r.js) prepends this path to .libPaths().
-    lib_path <- fs::path(runtime_dest, "library")
     fs::dir_create(lib_path, recurse = TRUE)
 
     # Use the CACHED Rscript, not the bundled copy. The cached binary
@@ -231,6 +235,14 @@ embed_r_runtime <- function(output_dir, packages, repos, version,
   # This runs after the local packages install, so it covers them too.
   if (isTRUE(prune)) {
     prune_bundled_r_runtime(runtime_dest, verbose = verbose)
+  }
+
+  # portable R's .portable wrapper rewrites CRAN .so load commands after
+  # install.packages() without re-signing them. macOS then kills R with
+  # "Code Signature Invalid" when the package is loaded. Re-sign the installed
+  # library after all package installs and pruning are complete.
+  if (identical(Sys.info()[["sysname"]], "Darwin") && dir.exists(as.character(lib_path))) {
+    sign_macos_r_library(as.character(lib_path), verbose = verbose)
   }
 
   if (verbose) cli::cli_alert_success("Embedded R runtime")
@@ -848,4 +860,89 @@ local_r_duration <- function(seconds) {
   } else {
     cli::format_inline("{seconds} second{?s}")
   }
+}
+
+# Re-sign the macOS R package library after portable R's .portable wrapper has
+# rewritten CRAN binary load commands. The wrapper's fix_pkgs() uses
+# install_name_tool but does not re-sign the modified .so, so macOS can kill R
+# with "Code Signature Invalid" when the package is loaded. Re-sign only the
+# installed package library; the portable R runtime itself keeps its own
+# Developer ID signatures.
+sign_macos_r_library <- function(lib_path, verbose = TRUE) {
+  if (!identical(Sys.info()[["sysname"]], "Darwin")) {
+    return(invisible(character(0)))
+  }
+  if (!dir.exists(lib_path)) {
+    return(invisible(character(0)))
+  }
+
+  codesign <- Sys.which("codesign")
+  file_cmd <- Sys.which("file")
+  xattr_cmd <- Sys.which("xattr")
+  if (!nzchar(codesign)) {
+    cli::cli_abort("macOS codesign was not found; cannot re-sign the bundled R library.")
+  }
+  if (!nzchar(file_cmd)) {
+    cli::cli_abort("The macOS file command was not found; cannot identify Mach-O files to re-sign.")
+  }
+
+  files <- list.files(lib_path, recursive = TRUE, full.names = TRUE, all.files = TRUE)
+  files <- files[!dir.exists(files)]
+  # Installed R packages ship their compiled code as .so/.dylib. Inspect only
+  # those, not every help page, to keep the signing pass fast.
+  files <- files[grepl("\\.(so|dylib)$", files, ignore.case = TRUE)]
+  if (length(files) == 0) {
+    return(invisible(character(0)))
+  }
+
+  is_macho <- vapply(files, function(f) {
+    out <- tryCatch(
+      processx::run(file_cmd, c("-b", f), error_on_status = FALSE)$stdout,
+      error = function(e) ""
+    )
+    any(grepl("Mach-O", out, fixed = TRUE))
+  }, logical(1))
+  files <- files[is_macho]
+  if (length(files) == 0) {
+    return(invisible(character(0)))
+  }
+
+  if (verbose) {
+    cli::cli_alert_info(
+      "Re-signing {length(files)} macOS Mach-O file{?s} in the bundled R library"
+    )
+  }
+
+  for (f in files) {
+    # codesign refuses files carrying Finder/resource metadata.
+    if (nzchar(xattr_cmd)) {
+      try(processx::run(xattr_cmd, c("-cr", f), error_on_status = FALSE), silent = TRUE)
+    }
+    try(Sys.chmod(f, mode = "0755"), silent = TRUE)
+
+    signed <- processx::run(
+      codesign, c("--force", "--sign", "-", f),
+      error_on_status = FALSE, echo = FALSE
+    )
+    if (signed$status != 0) {
+      cli::cli_abort(c(
+        "Failed to re-sign {.path {f}}.",
+        "x" = "codesign exited with status {signed$status}.",
+        "i" = "stderr: {trimws(signed$stderr %||% '')}"
+      ))
+    }
+
+    checked <- processx::run(
+      codesign, c("--verify", "--verbose=1", f),
+      error_on_status = FALSE, echo = FALSE
+    )
+    if (checked$status != 0) {
+      cli::cli_abort(c(
+        "Re-signed file does not verify: {.path {f}}.",
+        "i" = "stderr: {trimws(checked$stderr %||% '')}"
+      ))
+    }
+  }
+
+  invisible(files)
 }
