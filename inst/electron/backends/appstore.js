@@ -7,7 +7,9 @@
  * requests + progress + idle timeout + resume + retry + size/checksum
  * verification. update() forwards install progress.
  *
- * Layout under <userData>: state.json, apps/, lib/, private/, store-cache/
+ * Layout under <userData>: state.json, apps/, lib/<runtime>/, private/<runtime>/,
+ * store-cache/. Package libraries are scoped by R ABI (e.g. r-4.6) so a future
+ * runtime can coexist without mixing binaries.
  */
 
 const fs = require('fs');
@@ -427,6 +429,7 @@ function bundleMeta(m) {
     author: m.author || '',
     license: m.license || '',
     rVersion: m.r_version || '',
+    rAbi: m.r_abi || rAbiFromVersion(m.r_version),
     runtime: m.runtime || '',
     entry: m.entry || '',
   };
@@ -434,6 +437,7 @@ function bundleMeta(m) {
 
 const ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const BUNDLE_PLATFORMS = ['win-x64', 'win-arm64', 'mac-x64', 'mac-arm64', 'linux-x64'];
+const CURRENT_STATE_SCHEMA = 2;
 
 function validateManifest(m) {
   const bad = (msg) => { const e = new Error('invalid manifest: ' + msg); e.step = 'install'; return e; };
@@ -444,6 +448,10 @@ function validateManifest(m) {
   if (typeof m.version !== 'string' || !m.version) throw bad('missing version');
   if (BUNDLE_PLATFORMS.indexOf(m.platform) === -1) throw bad('bad platform');
   if (typeof m.entry !== 'string' || !m.entry) throw bad('missing entry');
+  if (typeof m.r_version !== 'string' || !m.r_version) throw bad('missing r_version');
+  if (m.r_abi !== undefined && (typeof m.r_abi !== 'string' || !/^\d+\.\d+$/.test(m.r_abi))) {
+    throw bad('bad r_abi');
+  }
   if (!Array.isArray(m.packages)) throw bad('packages must be an array');
   for (const p of m.packages) {
     if (!p || typeof p.name !== 'string' || typeof p.version !== 'string' || typeof p.path !== 'string') {
@@ -499,8 +507,58 @@ function readRuntimePackages(runtimeLibrary, log) {
   return out;
 }
 
+// ---- Runtime / ABI helpers ------------------------------------------------
+// R patch releases share a minor ABI ("4.6"); a new minor ("4.7") needs its own
+// runtime and package library. Runtime ids are used in paths and state keys so
+// packages built for different R minors can never be mixed.
+function rAbiFromVersion(version) {
+  const m = String(version || '').match(/^(\d+)\.(\d+)/);
+  return m ? m[1] + '.' + m[2] : '';
+}
+function runtimeIdFromVersion(version) {
+  const abi = rAbiFromVersion(version);
+  return abi ? 'r-' + abi : '';
+}
+function runtimeIdFromAbi(abi) {
+  return /^\d+\.\d+$/.test(String(abi || '')) ? 'r-' + abi : '';
+}
+function splitSharedKey(key) {
+  const s = String(key || '');
+  const i = s.indexOf('/');
+  if (i > 0 && i < s.length - 1) {
+    return { runtime: s.slice(0, i), name: s.slice(i + 1) };
+  }
+  return { runtime: '', name: s };
+}
+function joinSharedKey(runtimeId, name) {
+  return String(runtimeId || '') + '/' + String(name || '');
+}
+// Find Rscript inside a runtime root: <root>/bin/Rscript,
+// <root>/portable-r-.../bin/Rscript, or <root>/<version>/bin/Rscript.
+function findRscriptInRuntime(root) {
+  if (!root || !fs.existsSync(root)) return '';
+  const exe = process.platform === 'win32' ? 'Rscript.exe' : 'Rscript';
+  const direct = path.join(root, 'bin', exe);
+  if (fs.existsSync(direct)) return direct;
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (e) { return ''; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const first = path.join(root, entry.name, 'bin', exe);
+    if (fs.existsSync(first)) return first;
+    let subs = [];
+    try { subs = fs.readdirSync(path.join(root, entry.name), { withFileTypes: true }); } catch (e) { continue; }
+    for (const sub of subs) {
+      if (!sub.isDirectory()) continue;
+      const second = path.join(root, entry.name, sub.name, 'bin', exe);
+      if (fs.existsSync(second)) return second;
+    }
+  }
+  return '';
+}
+
 function createAppStore(options) {
-  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {}, getDownloadMirror = () => '', runtimeLibrary = '' } = options;
+  const { startBackend, shellVersion = '', shellRVersion = '', log = () => {}, getDownloadMirror = () => '', runtimeLibrary = '', runtimeRoot = '' } = options;
   // Data root holds the installed apps + libraries. Defaults to the Electron
   // userData dir for backward compatibility; the shell passes an explicit,
   // user-configurable dataRoot (e.g. %LOCALAPPDATA%\ShinyApps).
@@ -515,17 +573,244 @@ function createAppStore(options) {
   const catalogCachePath = path.join(dataRoot, 'catalog-cache.json');
   const iconCacheDir = path.join(dataRoot, 'icons');
   const iconIndexPath = path.join(iconCacheDir, 'index.json');
-  for (const d of [appsDir, sharedLib, privateRoot, cacheDir, iconCacheDir]) fs.mkdirSync(d, { recursive: true });
-  const runtimePackages = readRuntimePackages(runtimeLibrary, log);
+
+  const runtimeAbi = options.runtimeAbi || rAbiFromVersion(shellRVersion) || '4.6';
+  const shellRuntimeId = options.runtimeId || runtimeIdFromAbi(runtimeAbi) || 'r-4.6';
+  const shellRuntimeRoot = runtimeRoot || (runtimeLibrary ? path.dirname(runtimeLibrary) : '');
+  const shellRuntime = {
+    id: shellRuntimeId,
+    abi: runtimeAbi,
+    version: shellRVersion || '',
+    root: shellRuntimeRoot,
+    rscript: options.runtimeRscript || findRscriptInRuntime(shellRuntimeRoot),
+    library: runtimeLibrary || (shellRuntimeRoot ? path.join(shellRuntimeRoot, 'library') : ''),
+    source: 'shell',
+  };
+  const runtimePackagesByRuntime = new Map();
+  runtimePackagesByRuntime.set(shellRuntimeId, readRuntimePackages(shellRuntime.library, log));
+
+  function sharedRoot(runtimeId) {
+    return path.join(sharedLib, runtimeId || shellRuntimeId);
+  }
+  function privateRootFor(runtimeId) {
+    return path.join(privateRoot, runtimeId || shellRuntimeId);
+  }
+  function privateDirFor(runtimeId, appId) {
+    return path.join(privateRootFor(runtimeId), appId);
+  }
+  function runtimePackagesFor(runtimeId) {
+    return runtimePackagesByRuntime.get(runtimeId) || new Map();
+  }
+  function abiForRuntime(runtimeId) {
+    if (runtimeId === shellRuntimeId) return shellRuntime.abi;
+    const rec = state.runtimes && state.runtimes[runtimeId];
+    return (rec && rec.abi) || '';
+  }
+
+  for (const d of [appsDir, sharedLib, privateRoot, sharedRoot(shellRuntimeId), privateRootFor(shellRuntimeId), cacheDir, iconCacheDir]) {
+    fs.mkdirSync(d, { recursive: true });
+  }
 
   let state = loadState();
+  let stateChanged = false;
   // Older or hand-edited state files may miss a section; every code path below
-  // assumes both maps exist.
-  if (!state || typeof state !== 'object') state = { schema: 1, apps: {}, shared: {} };
-  if (!state.apps || typeof state.apps !== 'object') state.apps = {};
-  if (!state.shared || typeof state.shared !== 'object') state.shared = {};
+  // assumes all maps exist.
+  if (!state || typeof state !== 'object') { state = { schema: 2, apps: {}, shared: {}, runtimes: {} }; stateChanged = true; }
+  if (!state.apps || typeof state.apps !== 'object') { state.apps = {}; stateChanged = true; }
+  if (!state.shared || typeof state.shared !== 'object') { state.shared = {}; stateChanged = true; }
+  if (!state.runtimes || typeof state.runtimes !== 'object') { state.runtimes = {}; stateChanged = true; }
+
+  const previousSchema = Number(state.schema) || 1;
+  if (previousSchema > CURRENT_STATE_SCHEMA) {
+    const e = new Error(
+      'This local store was created by a newer ShinyApps (state schema ' +
+      previousSchema + '). Downgrading is not supported; install the newer ' +
+      'ShinyApps build, or reset local data after backing up your apps.'
+    );
+    e.code = 'STATE_SCHEMA_TOO_NEW';
+    throw e;
+  }
+  if (previousSchema < 2 && fs.existsSync(statePath)) {
+    // One-time safety copy before moving libraries and state keys.
+    try { fs.copyFileSync(statePath, statePath + '.v1.bak'); } catch (e) { /* best effort */ }
+  }
+  for (const rec of Object.values(state.apps)) {
+    if (!rec || typeof rec !== 'object') continue;
+    const abi = rec.r_abi || rAbiFromVersion(rec.r_version) || runtimeAbi;
+    if (!rec.r_abi) { rec.r_abi = abi; stateChanged = true; }
+    if (!rec.runtime) { rec.runtime = runtimeIdFromAbi(abi) || shellRuntimeId; stateChanged = true; }
+  }
+
+  // Schema 1 predates runtime-scoped libraries. Move its flat entries into the
+  // shell runtime and relocate the existing package directories once, so an
+  // in-place shell update keeps every installed app runnable.
+  if (previousSchema < 2) {
+    const migratedShared = {};
+    for (const [key, entry] of Object.entries(state.shared)) {
+      const parsed = splitSharedKey(key);
+      if (parsed.runtime) {
+        migratedShared[key] = entry;
+        continue;
+      }
+      const next = Object.assign({}, entry || {});
+      next.runtime = shellRuntimeId;
+      next.r_abi = runtimeAbi;
+      migratedShared[joinSharedKey(shellRuntimeId, parsed.name)] = next;
+      stateChanged = true;
+    }
+    state.shared = migratedShared;
+
+    const runtimes = new Set([shellRuntimeId]);
+    for (const rec of Object.values(state.apps)) {
+      if (rec && rec.runtime) runtimes.add(rec.runtime);
+    }
+    for (const runtime of runtimes) {
+      const targetLib = sharedRoot(runtime);
+      fs.mkdirSync(targetLib, { recursive: true });
+      let names = [];
+      try { names = fs.readdirSync(sharedLib); } catch (e) { names = []; }
+      for (const name of names) {
+        // Do not move a runtime directory into itself; only legacy package
+        // directories are relocated.
+        if (name === runtime || /^r-\d+\.\d+$/.test(name)) continue;
+        const src = path.join(sharedLib, name);
+        const dst = path.join(targetLib, name);
+        if (fs.existsSync(dst)) continue;
+        let isDir = false;
+        try { isDir = fs.statSync(src).isDirectory(); } catch (e) { isDir = false; }
+        if (!isDir) continue;
+        try {
+          fs.renameSync(src, dst);
+          stateChanged = true;
+        } catch (e) {
+          try {
+            fs.cpSync(src, dst, { recursive: true });
+            stateChanged = true;
+          } catch (e2) { /* keep legacy copy; reconcile will report it */ }
+        }
+      }
+      const targetPrivate = privateRootFor(runtime);
+      fs.mkdirSync(targetPrivate, { recursive: true });
+      for (const id of Object.keys(state.apps)) {
+        const rec = state.apps[id];
+        if ((rec.runtime || shellRuntimeId) !== runtime) continue;
+        const src = path.join(privateRoot, id);
+        const dst = path.join(targetPrivate, id);
+        if (!fs.existsSync(src) || fs.existsSync(dst)) continue;
+        try {
+          fs.renameSync(src, dst);
+          stateChanged = true;
+        } catch (e) {
+          try {
+            fs.cpSync(src, dst, { recursive: true });
+            stateChanged = true;
+          } catch (e2) { /* keep legacy copy; reconcile will report it */ }
+        }
+      }
+    }
+    state.schema = 2;
+    stateChanged = true;
+  }
+
+  state.runtimes[shellRuntimeId] = Object.assign({}, state.runtimes[shellRuntimeId], {
+    abi: shellRuntime.abi,
+    version: shellRuntime.version,
+    source: 'shell',
+  });
   for (const entry of Object.values(state.shared)) {
     if (entry && !Array.isArray(entry.refs)) entry.refs = [];
+  }
+  if (stateChanged) {
+    try { saveState(); } catch (e) { log('warn: could not save migrated state:', e && e.message); }
+  }
+
+  function runtimeInfo(runtimeId) {
+    if (!runtimeId || runtimeId === shellRuntimeId) return shellRuntime;
+    const rec = state.runtimes && state.runtimes[runtimeId];
+    if (!rec) return null;
+    const root = rec.path || '';
+    const rscript = rec.rscript || findRscriptInRuntime(root);
+    const library = rec.library || (root ? path.join(root, 'library') : '');
+    if (!rscript || !fs.existsSync(rscript)) return null;
+    if (!runtimePackagesByRuntime.has(runtimeId)) {
+      runtimePackagesByRuntime.set(runtimeId, readRuntimePackages(library, log));
+    }
+    return {
+      id: runtimeId,
+      abi: rec.abi || rAbiFromVersion(rec.version),
+      version: rec.version || '',
+      root: root,
+      rscript: rscript,
+      library: library,
+      source: rec.source || 'downloaded',
+    };
+  }
+  function runtimeForApp(rec, manifest) {
+    const abi = (rec && rec.r_abi) ||
+      (manifest && manifest.r_abi) ||
+      rAbiFromVersion(manifest && manifest.r_version) ||
+      (rec && rAbiFromVersion(rec.r_version)) ||
+      shellRuntime.abi;
+    const id = (rec && rec.runtime) || runtimeIdFromAbi(abi) || shellRuntimeId;
+    return runtimeInfo(id);
+  }
+  function requireRuntime(rec, manifest) {
+    const runtime = runtimeForApp(rec, manifest);
+    if (runtime) return runtime;
+    const abi = (rec && rec.r_abi) ||
+      (manifest && manifest.r_abi) ||
+      rAbiFromVersion(manifest && manifest.r_version) || '';
+    const e = new Error('app needs the R ' + (abi || 'runtime') +
+      ' runtime, but it is not installed');
+    e.step = 'resolve';
+    e.code = 'RUNTIME_MISSING';
+    throw e;
+  }
+
+  function artifactAbi(art, entry) {
+    return (art && art.r_abi) ||
+      (entry && entry.r_abi) ||
+      rAbiFromVersion(art && art.r_version) ||
+      rAbiFromVersion(entry && entry.r_version) || '';
+  }
+  // Pick the artifact for a platform. Prefer the requested runtime; otherwise
+  // use an installed runtime, then the highest declared runtime. The return
+  // value includes the runtime id even when that runtime is not installed, so
+  // the caller can report RUNTIME_MISSING instead of "no bundle".
+  function chooseArtifact(entry, plat, preferredRuntimeId) {
+    const byRuntime = entry && entry.artifacts_by_runtime && entry.artifacts_by_runtime[plat];
+    if (byRuntime && typeof byRuntime === 'object') {
+      const ids = Object.keys(byRuntime).filter(function (id) { return byRuntime[id]; });
+      if (ids.length) {
+        if (preferredRuntimeId && byRuntime[preferredRuntimeId]) {
+          return { art: byRuntime[preferredRuntimeId], runtimeId: preferredRuntimeId };
+        }
+        const installed = ids.filter(function (id) { return !!runtimeInfo(id); });
+        const pool = installed.length ? installed : ids;
+        pool.sort(function (a, b) {
+          return cmpVersion(String(b).replace(/^r-/, ''), String(a).replace(/^r-/, ''));
+        });
+        return { art: byRuntime[pool[0]], runtimeId: pool[0] };
+      }
+    }
+    const legacy = entry && entry.artifacts && entry.artifacts[plat];
+    if (legacy) {
+      return {
+        art: legacy,
+        runtimeId: runtimeIdFromAbi(artifactAbi(legacy, entry)) || shellRuntimeId,
+      };
+    }
+    return null;
+  }
+  function runtimeForEntry(entry, preferredRuntimeId) {
+    const picked = chooseArtifact(entry, platformKey(), preferredRuntimeId || '');
+    if (!picked) return null;
+    const runtime = runtimeInfo(picked.runtimeId);
+    if (!runtime) return null;
+    return Object.assign({}, runtime, {
+      artifactAbi: artifactAbi(picked.art, entry) || runtime.abi,
+      artifactRVersion: picked.art.r_version || entry.r_version || '',
+    });
   }
   let catalog = null;
   let catalogFetchedAt = 0;
@@ -595,10 +880,12 @@ function createAppStore(options) {
   // own copy, and leave the app unable to load the package.
   function reconcileShared() {
     let changed = false;
-    for (const name of Object.keys(state.shared || {})) {
-      if (packagePresent(path.join(sharedLib, name))) continue;
-      log(`warn: shared package ${name} is missing; dropping its record so the next install restores it`);
-      delete state.shared[name];
+    for (const key of Object.keys(state.shared || {})) {
+      const parsed = splitSharedKey(key);
+      const dir = path.join(sharedRoot(parsed.runtime || shellRuntimeId), parsed.name);
+      if (packagePresent(dir)) continue;
+      log(`warn: shared package ${key} is missing; dropping its record so the next install restores it`);
+      delete state.shared[key];
       changed = true;
     }
     if (!changed) return false;
@@ -627,8 +914,8 @@ function createAppStore(options) {
   // Remove app-layer copies of packages the bundled R already provides.
   // KernSmooth/MASS/... built against a different R.framework otherwise shadow
   // the runtime's own copies at .libPaths() time, which is fatal on macOS.
-  function runtimeShadowRemovable(name, dir) {
-    const pkg = runtimePackages.get(name);
+  function runtimeShadowRemovable(name, dir, runtimeId) {
+    const pkg = runtimePackagesFor(runtimeId || shellRuntimeId).get(name);
     if (!pkg) return false;
     if (!fs.existsSync(path.join(dir, 'DESCRIPTION'))) return false;
     if (pkg.priority === 'base') return true;
@@ -637,24 +924,27 @@ function createAppStore(options) {
   }
 
   function cleanupRuntimeShadows() {
-    if (!runtimePackages.size) return false;
     let changed = false;
-    for (const name of runtimePackages.keys()) {
-      const dir = path.join(sharedLib, name);
-      if (!runtimeShadowRemovable(name, dir)) continue;
+    for (const key of Object.keys(state.shared)) {
+      const parsed = splitSharedKey(key);
+      const runtimeId = parsed.runtime || shellRuntimeId;
+      const dir = path.join(sharedRoot(runtimeId), parsed.name);
+      if (!runtimeShadowRemovable(parsed.name, dir, runtimeId)) continue;
       try {
         fs.rmSync(dir, { recursive: true, force: true });
-        delete state.shared[name];
+        delete state.shared[key];
         changed = true;
-        log(`removed legacy runtime package ${name} from the shared library`);
+        log(`removed legacy runtime package ${parsed.name} from the shared library`);
       } catch (e) {
-        log(`warn: could not remove shared runtime package ${name}: ${e && e.message}`);
+        log(`warn: could not remove shared runtime package ${parsed.name}: ${e && e.message}`);
       }
     }
     for (const id of Object.keys(state.apps)) {
-      for (const name of runtimePackages.keys()) {
-        const dir = path.join(privateRoot, id, name);
-        if (!runtimeShadowRemovable(name, dir)) continue;
+      const rec = state.apps[id];
+      const runtimeId = (rec && rec.runtime) || shellRuntimeId;
+      for (const name of runtimePackagesFor(runtimeId).keys()) {
+        const dir = path.join(privateDirFor(runtimeId, id), name);
+        if (!runtimeShadowRemovable(name, dir, runtimeId)) continue;
         try {
           fs.rmSync(dir, { recursive: true, force: true });
           changed = true;
@@ -669,11 +959,13 @@ function createAppStore(options) {
     // provider left, so stop treating it as an app dependency.
     for (const id of Object.keys(state.apps)) {
       const rec = state.apps[id];
-      if (!Array.isArray(rec.packages)) continue;
+      if (!rec || !Array.isArray(rec.packages)) continue;
+      const runtimeId = rec.runtime || shellRuntimeId;
+      const runtimePkgs = runtimePackagesFor(runtimeId);
       const kept = rec.packages.filter((name) => {
-        if (!runtimePackages.has(name)) return true;
-        if (fs.existsSync(path.join(privateRoot, id, name, 'DESCRIPTION'))) return true;
-        if (fs.existsSync(path.join(sharedLib, name, 'DESCRIPTION'))) return true;
+        if (!runtimePkgs.has(name)) return true;
+        if (fs.existsSync(path.join(privateDirFor(runtimeId, id), name, 'DESCRIPTION'))) return true;
+        if (fs.existsSync(path.join(sharedRoot(runtimeId), name, 'DESCRIPTION'))) return true;
         return false;
       });
       if (kept.length !== rec.packages.length) {
@@ -830,15 +1122,27 @@ function createAppStore(options) {
     }
   }
 
-  async function install(id, onProgress = () => {}, signal = null) {
+  async function install(id, onProgress = () => {}, signal = null, opts = {}) {
     const entry = catalogEntry(id);
     if (!entry) { const e = new Error(`unknown app: ${id}`); e.step = 'resolve'; throw e; }
     const plat = platformKey();
-    const art = entry.artifacts && entry.artifacts[plat];
-    if (!art) { const e = new Error(`no bundle for ${plat} of ${id}`); e.step = 'resolve'; throw e; }
-    // Same gate as installFromFile: never install a bundle this shell cannot run.
-    if (shellRVersion && entry.r_version && cmpVersion(shellRVersion, entry.r_version) < 0) {
-      const e = new Error(`app needs R ${entry.r_version}; this build ships R ${shellRVersion}`);
+    const picked = chooseArtifact(entry, plat, opts.runtimeId || '');
+    if (!picked) { const e = new Error(`no bundle for ${plat} of ${id}`); e.step = 'resolve'; throw e; }
+    const art = picked.art;
+    const runtimeId = picked.runtimeId;
+    const entryAbi = artifactAbi(art, entry) || shellRuntime.abi;
+    const entryRVersion = art.r_version || entry.r_version || '';
+    const runtime = runtimeInfo(runtimeId);
+    if (!runtime) {
+      const e = new Error(`app needs the R ${entryAbi} runtime; install that runtime or update ShinyApps`);
+      e.step = 'resolve'; e.code = 'RUNTIME_MISSING'; throw e;
+    }
+    if (runtime.abi && entryAbi && runtime.abi !== entryAbi) {
+      const e = new Error(`app needs R ${entryAbi}; this build provides R ${runtime.abi}`);
+      e.step = 'resolve'; e.code = 'INCOMPATIBLE'; throw e;
+    }
+    if (runtime.version && entryRVersion && cmpVersion(runtime.version, entryRVersion) < 0) {
+      const e = new Error(`app needs R ${entryRVersion}; the ${runtimeId} runtime is R ${runtime.version}`);
       e.step = 'resolve'; e.code = 'INCOMPATIBLE'; throw e;
     }
     if (shellVersion && entry.min_shell_version && cmpVersion(shellVersion, entry.min_shell_version) < 0) {
@@ -846,7 +1150,7 @@ function createAppStore(options) {
       e.step = 'resolve'; e.code = 'INCOMPATIBLE'; throw e;
     }
 
-    const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}.zip`);
+    const zip = path.join(cacheDir, `${id}-${entry.version}-${plat}-${runtimeId}.zip`);
     let step = 'download';
     let staging = null;
     let finalDir = null;
@@ -925,6 +1229,15 @@ function createAppStore(options) {
 
       const manifest = JSON.parse(fs.readFileSync(path.join(staging, 'manifest.json'), 'utf8'));
       if (manifest.platform !== plat) log(`warn: manifest platform ${manifest.platform} != ${plat}`);
+      const manifestAbi = manifest.r_abi || rAbiFromVersion(manifest.r_version);
+      if (manifestAbi && runtime.abi && manifestAbi !== runtime.abi) {
+        const e = new Error(`bundle was built for R ${manifestAbi}; the ${runtimeId} runtime is R ${runtime.abi}`);
+        e.step = 'install'; e.code = 'INCOMPATIBLE'; throw e;
+      }
+      if (runtime.version && manifest.r_version && cmpVersion(runtime.version, manifest.r_version) < 0) {
+        const e = new Error(`bundle needs R ${manifest.r_version}; the ${runtimeId} runtime is R ${runtime.version}`);
+        e.step = 'install'; e.code = 'INCOMPATIBLE'; throw e;
+      }
       finalDir = path.join(appsDir, id, manifest.version);
 
       // Only the commit touches global state; hold the lock across rename,
@@ -939,16 +1252,24 @@ function createAppStore(options) {
         staging = null;
 
         onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-        const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+        const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], runtimeId, onProgress);
+        const old = state.apps[id] || null;
+        const oldRuntime = old ? (old.runtime || shellRuntimeId) : null;
 
         state.apps[id] = {
           version: manifest.version, platform: plat, dir: finalDir,
           packages: linkedPackages,
+          runtime: runtimeId,
+          r_abi: runtime.abi || manifestAbi || '',
           source: 'catalog',
           meta: bundleMeta(manifest),
         };
         saveState();
         committed = true;
+        await pruneRefs(id, linkedPackages, runtimeId);
+        if (oldRuntime && oldRuntime !== runtimeId) {
+          await pruneRefs(id, [], oldRuntime);
+        }
         log(`installed ${id}@${manifest.version} (${(manifest.packages || []).length} packages)`);
         onProgress({ phase: 'done', percent: 100, statusText: 'installed' });
         // The cached archive has served its purpose; reclaim the disk.
@@ -1019,8 +1340,16 @@ function createAppStore(options) {
       if (manifest.platform !== plat) {
         const e = new Error(`bundle is for ${manifest.platform}; this machine is ${plat}`); e.step = 'install'; throw e;
       }
-      if (shellRVersion && manifest.r_version && cmpVersion(shellRVersion, manifest.r_version) < 0) {
-        const e = new Error(`bundle needs R ${manifest.r_version}; this build ships R ${shellRVersion}`); e.step = 'install'; throw e;
+      const manifestAbi = manifest.r_abi || rAbiFromVersion(manifest.r_version) || shellRuntime.abi;
+      const runtimeId = runtimeIdFromAbi(manifestAbi) || shellRuntimeId;
+      const runtime = requireRuntime(null, manifest);
+      if (runtime.abi && manifestAbi && runtime.abi !== manifestAbi) {
+        const e = new Error(`bundle was built for R ${manifestAbi}; the ${runtimeId} runtime is R ${runtime.abi}`);
+        e.step = 'install'; e.code = 'INCOMPATIBLE'; throw e;
+      }
+      if (runtime.version && manifest.r_version && cmpVersion(runtime.version, manifest.r_version) < 0) {
+        const e = new Error(`bundle needs R ${manifest.r_version}; the ${runtimeId} runtime is R ${runtime.version}`);
+        e.step = 'install'; e.code = 'INCOMPATIBLE'; throw e;
       }
       if (shellVersion && manifest.min_shell_version && cmpVersion(shellVersion, manifest.min_shell_version) < 0) {
         const e = new Error(`bundle needs a newer ShinyApps (${manifest.min_shell_version}); you have ${shellVersion}`); e.step = 'install'; throw e;
@@ -1040,6 +1369,7 @@ function createAppStore(options) {
       return await withCommitLock(async () => {
         if (signal && signal.aborted) throw cancelError();
         const old = state.apps[id] || null;
+        const oldRuntime = old ? (old.runtime || shellRuntimeId) : null;
         await fsp.mkdir(path.dirname(finalDir), { recursive: true });
         touchedFinalDir = true;
         await fsp.rm(finalDir, { recursive: true, force: true });
@@ -1047,11 +1377,13 @@ function createAppStore(options) {
         staging = null;
 
         onProgress({ phase: 'linking', percent: 100, statusText: 'linking packages' });
-        const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], onProgress);
+        const linkedPackages = await reconcilePackages(id, finalDir, manifest.packages || [], runtimeId, onProgress);
 
         state.apps[id] = {
           version: manifest.version, platform: plat, dir: finalDir,
           packages: linkedPackages,
+          runtime: runtimeId,
+          r_abi: runtime.abi || manifestAbi || '',
           source: 'local',
           // Keep where a sideloaded app came from, so the launcher can offer
           // "Copy download link" (a URL install) or "Copy bundle path" later.
@@ -1062,8 +1394,12 @@ function createAppStore(options) {
         };
         saveState();
         committed = true;
-        // Reclaim the previous version's files and shared-library refs.
-        await pruneRefs(id, state.apps[id].packages);
+        // Reclaim the previous version's files and shared-library refs. If the
+        // replacement changed runtime, release the old runtime's refs too.
+        await pruneRefs(id, state.apps[id].packages, runtimeId);
+        if (oldRuntime && oldRuntime !== runtimeId) {
+          await pruneRefs(id, [], oldRuntime);
+        }
         if (old && old.dir && path.resolve(old.dir) !== path.resolve(finalDir)) {
           await fsp.rm(old.dir, { recursive: true, force: true }).catch(() => {});
         }
@@ -1111,21 +1447,26 @@ function createAppStore(options) {
     }
   }
 
-  async function reconcilePackages(appId, appDir, packages, onProgress = () => {}) {
+  async function reconcilePackages(appId, appDir, packages, runtimeId = shellRuntimeId, onProgress = () => {}) {
     const keptRuntime = new Set();
+    const runtimePkgs = runtimePackagesFor(runtimeId);
+    const runtimeAbi = abiForRuntime(runtimeId);
+    const sharedBase = sharedRoot(runtimeId);
+    const privateBase = privateDirFor(runtimeId, appId);
+    const sharedKeyFor = (name) => joinSharedKey(runtimeId, name);
     for (const pkg of packages) {
       const src = path.join(appDir, pkg.path);
-      const sharedDir = path.join(sharedLib, pkg.name);
-      const privateDir = path.join(privateRoot, appId, pkg.name);
+      const sharedDir = path.join(sharedBase, pkg.name);
+      const privateDir = path.join(privateBase, pkg.name);
       const haveSrc = packagePresent(src);
       // The bundled R provides base/recommended packages. Never let a bundle
       // copy shadow them: they may be compiled against another R's libraries.
-      if (runtimePackages.has(pkg.name)) {
-        const sharedRemovable = runtimeShadowRemovable(pkg.name, sharedDir);
+      if (runtimePkgs.has(pkg.name)) {
+        const sharedRemovable = runtimeShadowRemovable(pkg.name, sharedDir, runtimeId);
         if (sharedRemovable) {
           try {
             await fsp.rm(sharedDir, { recursive: true, force: true });
-            delete state.shared[pkg.name];
+            delete state.shared[sharedKeyFor(pkg.name)];
           } catch (e) {
             log(`warn: could not remove shared runtime package ${pkg.name}: ${e && e.message}`);
           }
@@ -1135,21 +1476,21 @@ function createAppStore(options) {
         if (packagePresent(privateDir) || packagePresent(sharedDir)) {
           keptRuntime.add(pkg.name);
         }
-        if (!sharedRemovable && packagePresent(sharedDir) && state.shared[pkg.name] &&
-            !state.shared[pkg.name].refs.includes(appId)) {
-          state.shared[pkg.name].refs.push(appId);
+        if (!sharedRemovable && packagePresent(sharedDir) && state.shared[sharedKeyFor(pkg.name)] &&
+            !state.shared[sharedKeyFor(pkg.name)].refs.includes(appId)) {
+          state.shared[sharedKeyFor(pkg.name)].refs.push(appId);
         }
         try { await fsp.rm(src, { recursive: true, force: true }); } catch (e) { /* best effort */ }
         log(`using bundled runtime ${pkg.name} for ${appId}`);
         continue;
       }
-      let shared = state.shared[pkg.name];
+      let shared = state.shared[sharedKeyFor(pkg.name)];
       // A record whose folder is gone is worse than no record: the bundle's own
       // copy is deleted below, and a reinstall would skip the copy because the
       // version still "matches". Drop it so this install restores the files.
       if (shared && !packagePresent(sharedDir)) {
         log(`warn: shared copy of ${pkg.name} is missing; restoring it from ${appId}`);
-        delete state.shared[pkg.name];
+        delete state.shared[sharedKeyFor(pkg.name)];
         shared = undefined;
       }
 
@@ -1158,7 +1499,12 @@ function createAppStore(options) {
         if (!haveSrc) throw new Error(`package ${pkg.name} is missing from the bundle and the shared library`);
         await copyDir(src, sharedDir);
         if (!packagePresent(sharedDir)) throw new Error(`could not link ${pkg.name} into the shared library`);
-        state.shared[pkg.name] = { version: pkg.version, refs: [appId] };
+        state.shared[sharedKeyFor(pkg.name)] = {
+          version: pkg.version,
+          refs: [appId],
+          runtime: runtimeId,
+          r_abi: runtimeAbi,
+        };
         target = sharedDir;
       } else if (shared.version === pkg.version) {
         if (!shared.refs.includes(appId)) shared.refs.push(appId);
@@ -1184,18 +1530,21 @@ function createAppStore(options) {
     }
     saveState();
     return packages
-      .filter((pkg) => !runtimePackages.has(pkg.name) || keptRuntime.has(pkg.name))
+      .filter((pkg) => !runtimePkgs.has(pkg.name) || keptRuntime.has(pkg.name))
       .map((pkg) => pkg.name);
   }
 
-  async function pruneRefs(appId, keepNames) {
+  async function pruneRefs(appId, keepNames, runtimeId) {
+    const runtime = runtimeId || (state.apps[appId] && state.apps[appId].runtime) || shellRuntimeId;
     const keep = new Set(keepNames);
-    for (const [name, entry] of Object.entries(state.shared)) {
-      if (keep.has(name) || !entry.refs.includes(appId)) continue;
+    for (const [key, entry] of Object.entries(state.shared)) {
+      const parsed = splitSharedKey(key);
+      if ((parsed.runtime || shellRuntimeId) !== runtime) continue;
+      if (keep.has(parsed.name) || !entry.refs.includes(appId)) continue;
       entry.refs = entry.refs.filter((x) => x !== appId);
       if (entry.refs.length === 0) {
-        await fsp.rm(path.join(sharedLib, name), { recursive: true, force: true });
-        delete state.shared[name];
+        await fsp.rm(path.join(sharedRoot(runtime), parsed.name), { recursive: true, force: true });
+        delete state.shared[key];
       }
     }
     saveState();
@@ -1208,16 +1557,17 @@ function createAppStore(options) {
     // packages at the same time cannot observe a half-updated shared library.
     await withCommitLock(async () => {
       if (!state.apps[id]) return;
+      const runtimeId = state.apps[id].runtime || shellRuntimeId;
       // Forget the install BEFORE touching the filesystem. On Windows a file can
       // still be locked (R shutting down, virus scanner), and a failed rm must
       // not leave a ghost entry that the launcher lists but cannot start.
       delete state.apps[id];
       saveState();
-      for (const dir of [path.join(appsDir, id), path.join(privateRoot, id)]) {
+      for (const dir of [path.join(appsDir, id), privateDirFor(runtimeId, id)]) {
         try { await fsp.rm(dir, { recursive: true, force: true }); }
         catch (e) { log(`warn: could not remove ${dir}: ${e && e.message}; it will be left for cleanup`); }
       }
-      try { await pruneRefs(id, []); }
+      try { await pruneRefs(id, [], runtimeId); }
       catch (e) { log(`warn: could not release shared packages of ${id}: ${e && e.message}`); }
       saveState();
       log(`uninstalled ${id}`);
@@ -1237,23 +1587,38 @@ function createAppStore(options) {
       throw e;
     }
     if (running.has(id)) return running.get(id);
+    const runtime = requireRuntime(app, null);
+    const runtimeId = runtime.id;
     const entry = app.meta && app.meta.entry;
     const appPath = entry ? path.join(app.dir, path.dirname(entry)) : path.join(app.dir, 'app');
-    const libPaths = [path.join(privateRoot, id), sharedLib];
+    const privateBase = privateDirFor(runtimeId, id);
+    const sharedBase = sharedRoot(runtimeId);
+    const libPaths = [privateBase, sharedBase];
     // A bundle whose packages are gone cannot start; fail with an actionable
     // message instead of a bare "there is no package called ..." from R.
+    const runtimePkgs = runtimePackagesFor(runtimeId);
     const missing = (app.packages || []).filter((name) =>
-      !runtimePackages.has(name) &&
-      !packagePresent(path.join(privateRoot, id, name)) &&
-      !packagePresent(path.join(sharedLib, name)));
+      !runtimePkgs.has(name) &&
+      !packagePresent(path.join(privateBase, name)) &&
+      !packagePresent(path.join(sharedBase, name)));
     if (missing.length) {
       const e = new Error(`${id} cannot start: missing package${missing.length > 1 ? 's' : ''} ` +
         `${missing.join(', ')}. Uninstall and install the app again to restore them.`);
       e.code = 'MISSING_PACKAGES';
       throw e;
     }
-    log(`run ${id}: appPath=${appPath} libs=${libPaths.join(path.delimiter)}`);
-    const handle = await startBackend({ appId: id, appPath, libPaths });
+    log(`run ${id}: appPath=${appPath} libs=${libPaths.join(path.delimiter)} runtime=${runtimeId}`);
+    const handle = await startBackend({
+      appId: id,
+      appPath,
+      libPaths,
+      runtimeId: runtime.id,
+      runtimePath: runtime.root,
+      runtimeRscript: runtime.rscript,
+      runtimeLibrary: runtime.library,
+      runtimeAbi: runtime.abi,
+      runtimeVersion: runtime.version,
+    });
     running.set(id, handle);
     return handle;
   }
@@ -1272,12 +1637,24 @@ function createAppStore(options) {
     for (const [id, app] of Object.entries(state.apps)) {
       const e = catalogEntry(id);
       if (!e) continue;
-      // Count a newer version only when this platform has a bundle for it;
+      // Count a newer version only when this platform has some bundle for it;
       // otherwise there is nothing the user could install here.
-      if (e.artifacts && !e.artifacts[plat]) continue;
-      // Mirror the launcher's check: an update this shell cannot run (needs a
-      // newer R or a newer shell) is not offered, so it must not be counted.
-      if (shellRVersion && e.r_version && cmpVersion(shellRVersion, e.r_version) < 0) continue;
+      const hasPlatformArtifact = !!(
+        (e.artifacts && e.artifacts[plat]) ||
+        (e.artifacts_by_runtime && e.artifacts_by_runtime[plat] &&
+          Object.keys(e.artifacts_by_runtime[plat]).length)
+      );
+      if (!hasPlatformArtifact) continue;
+      // Mirror the launcher's check: an update whose runtime is not installed
+      // (or whose shell minimum is newer) is not offered.
+      const picked = chooseArtifact(e, plat, app.runtime || shellRuntimeId);
+      if (!picked) continue;
+      const runtime = runtimeInfo(picked.runtimeId);
+      if (!runtime) continue;
+      const entryAbi = artifactAbi(picked.art, e);
+      const entryRVersion = picked.art.r_version || e.r_version || '';
+      if (runtime.abi && entryAbi && runtime.abi !== entryAbi) continue;
+      if (runtime.version && entryRVersion && cmpVersion(runtime.version, entryRVersion) < 0) continue;
       if (shellVersion && e.min_shell_version && cmpVersion(shellVersion, e.min_shell_version) < 0) continue;
       if (cmpVersion(e.version, app.version) > 0) out.push({ id, from: app.version, to: e.version });
     }
@@ -1287,9 +1664,26 @@ function createAppStore(options) {
     const e = catalogEntry(id);
     const app = state.apps[id];
     if (!e || !app || cmpVersion(e.version, app.version) <= 0) return;
-    // Never install a bundle this shell cannot run.
-    if (shellRVersion && e.r_version && cmpVersion(shellRVersion, e.r_version) < 0) {
-      log(`update ${id} skipped: needs R ${e.r_version}, shell ships ${shellRVersion}`);
+    // Never install a bundle whose runtime is absent or too old.
+    const plat = platformKey();
+    const picked = chooseArtifact(e, plat, app.runtime || shellRuntimeId);
+    if (!picked) {
+      log(`update ${id} skipped: no bundle for ${plat}`);
+      return;
+    }
+    const runtime = runtimeInfo(picked.runtimeId);
+    const entryAbi = artifactAbi(picked.art, e);
+    const entryRVersion = picked.art.r_version || e.r_version || '';
+    if (!runtime) {
+      log(`update ${id} skipped: needs the R ${entryAbi} runtime`);
+      return;
+    }
+    if (runtime.abi && entryAbi && runtime.abi !== entryAbi) {
+      log(`update ${id} skipped: needs R ${entryAbi}, ${runtime.id} provides ${runtime.abi}`);
+      return;
+    }
+    if (runtime.version && entryRVersion && cmpVersion(runtime.version, entryRVersion) < 0) {
+      log(`update ${id} skipped: needs R ${entryRVersion}, ${runtime.id} provides ${runtime.version}`);
       return;
     }
     if (shellVersion && e.min_shell_version && cmpVersion(shellVersion, e.min_shell_version) < 0) {
@@ -1298,9 +1692,13 @@ function createAppStore(options) {
     }
     await stop(id);
     const oldDir = app.dir;
-    await install(id, onProgress, signal);
+    const oldRuntime = app.runtime || shellRuntimeId;
+    await install(id, onProgress, signal, { runtimeId: picked.runtimeId });
     await withCommitLock(async () => {
-      await pruneRefs(id, state.apps[id].packages);
+      await pruneRefs(id, state.apps[id].packages, state.apps[id].runtime);
+      if (oldRuntime !== state.apps[id].runtime) {
+        await pruneRefs(id, [], oldRuntime);
+      }
       // Never delete the freshly installed dir (guards against manifest==catalog mismatch).
       if (oldDir && path.resolve(oldDir) !== path.resolve(state.apps[id].dir)) {
         await fsp.rm(oldDir, { recursive: true, force: true });
@@ -1335,25 +1733,34 @@ function createAppStore(options) {
     let appsTotal = 0;
     let privateTotal = 0;
     for (const [id, ins] of appEntries) {
+      const runtimeId = ins.runtime || shellRuntimeId;
       let bytes = 0;
       try { bytes = await dirSize(path.join(appsDir, id)); } catch (e) {}
       let priv = 0;
-      try { priv = await dirSize(path.join(privateRoot, id)); } catch (e) {}
+      try { priv = await dirSize(privateDirFor(runtimeId, id)); } catch (e) {}
       appsTotal += bytes;
       privateTotal += priv;
-      apps.push({ id: id, version: ins.version, source: ins.source || '', bytes: bytes, privateBytes: priv });
+      apps.push({ id: id, version: ins.version, runtime: runtimeId, source: ins.source || '', bytes: bytes, privateBytes: priv });
       done++;
       report(done, total, 'Measuring ' + id + '\u2026');
     }
     const shared = [];
     let sharedTotal = 0;
-    for (const [name, entry] of sharedEntries) {
+    for (const [key, entry] of sharedEntries) {
+      const parsed = splitSharedKey(key);
+      const runtimeId = parsed.runtime || shellRuntimeId;
       let bytes = 0;
-      try { bytes = await dirSize(path.join(sharedLib, name)); } catch (e) {}
+      try { bytes = await dirSize(path.join(sharedRoot(runtimeId), parsed.name)); } catch (e) {}
       sharedTotal += bytes;
-      shared.push({ name: name, version: entry.version, refs: (entry.refs || []).length, bytes: bytes });
+      shared.push({
+        name: parsed.name,
+        runtime: runtimeId,
+        version: entry.version,
+        refs: (entry.refs || []).length,
+        bytes: bytes,
+      });
       done++;
-      report(done, total, 'Measuring ' + name + '\u2026');
+      report(done, total, 'Measuring ' + parsed.name + '\u2026');
     }
     report(done, total, 'Checking cache\u2026');
     let cacheBytes = 0, cacheFiles = 0;
@@ -1406,12 +1813,19 @@ function createAppStore(options) {
         try { const st = await fsp.stat(path.join(cacheDir, f)); if (st.isFile()) cacheFiles.push({ name: f, size: st.size }); } catch (e) {}
       }
     } catch (e) {}
-    const orphanShared = Object.keys(state.shared || {}).filter(function (n) {
-      const e = state.shared[n] || {};
-      // Refs to apps that are no longer installed are dead refs, not users.
-      const refs = (e.refs || []).filter(function (r) { return !!state.apps[r]; });
+    const orphanShared = Object.keys(state.shared || {}).filter(function (key) {
+      const e = state.shared[key] || {};
+      const parsed = splitSharedKey(key);
+      const runtimeId = parsed.runtime || shellRuntimeId;
+      // Refs to apps that are no longer installed (or that moved to another
+      // runtime) are dead refs, not users.
+      const refs = (e.refs || []).filter(function (r) {
+        const app = state.apps[r];
+        return !!app && (app.runtime || shellRuntimeId) === runtimeId;
+      });
       // A record whose folder is gone is unusable even with live refs.
-      return refs.length === 0 || !packagePresent(path.join(sharedLib, n));
+      return refs.length === 0 ||
+        !packagePresent(path.join(sharedRoot(runtimeId), parsed.name));
     });
     const total = cacheFiles.length + orphanShared.length;
     report(0, total, total ? 'Cleaning up\u2026' : 'Nothing to clean');
@@ -1420,10 +1834,17 @@ function createAppStore(options) {
       done++;
       report(done, total, 'Removing cache file\u2026');
     }
-    for (const name of orphanShared) {
-      try { const sp = path.join(sharedLib, name); freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); delete state.shared[name]; } catch (e) {}
+    for (const key of orphanShared) {
+      const parsed = splitSharedKey(key);
+      const runtimeId = parsed.runtime || shellRuntimeId;
+      try {
+        const sp = path.join(sharedRoot(runtimeId), parsed.name);
+        freed += await dirSize(sp);
+        await fsp.rm(sp, { recursive: true, force: true });
+        delete state.shared[key];
+      } catch (e) { /* best effort */ }
       done++;
-      report(done, total, 'Removing unused package ' + name + '\u2026');
+      report(done, total, 'Removing unused package ' + parsed.name + '\u2026');
     }
     saveState();
     report(done, total, 'Finalizing\u2026');
@@ -1441,12 +1862,19 @@ function createAppStore(options) {
       }
     } catch (e) {}
     // Private libraries for apps that are no longer installed are orphans too.
+    // privateRoot now contains one directory per runtime, each with app dirs.
     try {
-      const privIds = await fsp.readdir(privateRoot);
-      for (const id of privIds) {
-        if (state.apps[id]) continue;
-        const sp = path.join(privateRoot, id);
-        try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
+      const runtimes = await fsp.readdir(privateRoot, { withFileTypes: true });
+      for (const rt of runtimes) {
+        if (!rt.isDirectory()) continue;
+        const runtimeDir = path.join(privateRoot, rt.name);
+        const ids = await fsp.readdir(runtimeDir);
+        for (const id of ids) {
+          const rec = state.apps[id];
+          if (rec && (rec.runtime || shellRuntimeId) === rt.name) continue;
+          const sp = path.join(runtimeDir, id);
+          try { freed += await dirSize(sp); await fsp.rm(sp, { recursive: true, force: true }); } catch (e) {}
+        }
       }
     } catch (e) {}
     // App folders with no install record (left behind by a failed uninstall)
@@ -1488,13 +1916,20 @@ function createAppStore(options) {
       try { fs.mkdirSync(d, { recursive: true }); } catch (e) {}
       done++;
     }
+    try { fs.mkdirSync(sharedRoot(shellRuntimeId), { recursive: true }); } catch (e) {}
+    try { fs.mkdirSync(privateRootFor(shellRuntimeId), { recursive: true }); } catch (e) {}
     try { await fsp.rm(catalogCachePath, { force: true }); } catch (e) {}
     done++;
     catalog = null;
     catalogFetchedAt = 0;
     iconIndex = {};
     iconDataCache.clear();
-    state = { schema: 1, apps: {}, shared: {} };
+    state = { schema: 2, apps: {}, shared: {}, runtimes: {} };
+    state.runtimes[shellRuntimeId] = {
+      abi: shellRuntime.abi,
+      version: shellRuntime.version,
+      source: 'shell',
+    };
     saveState();
     report(total, total, 'Done');
   }
@@ -1510,6 +1945,12 @@ function createAppStore(options) {
     getCatalog: () => catalog,
     iconDataUrl,
     setCatalogUrl, installFromUrl,
+    runtimeInfo,
+    runtimeForEntry,
+    artifactForEntry: (entry, plat, preferredRuntimeId) => {
+      const picked = chooseArtifact(entry, plat, preferredRuntimeId || '');
+      return picked ? picked.art : null;
+    },
     usage, cleanup, resetLocal,
     getDiskFree: () => freeBytes(appsDir),
   };

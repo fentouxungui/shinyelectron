@@ -143,6 +143,13 @@ class NativeRBackend extends EventEmitter {
   findRscript(config, appPath) {
     this.emit('status', { phase: 'finding_runtime', message: 'Looking for R...' });
 
+    // The app store selected a concrete runtime (today the shell's bundled R,
+    // later a side-by-side runtime pack). Honor it before any discovery path.
+    if (config && config.runtime_rscript && fs.existsSync(config.runtime_rscript)) {
+      this.emit('status', { phase: 'runtime_found', message: 'Found bundled R' });
+      return config.runtime_rscript;
+    }
+
     // Check for bundled runtime embedded in the Electron app
     // Resolve ASAR-unpacked path (runtime files are extracted outside app.asar)
     let appBasePath = path.join(__dirname, '..');
@@ -369,7 +376,8 @@ class NativeRBackend extends EventEmitter {
     // Check and install dependencies (skip for bundled -- packages are baked in at build time)
     const checker = require('./dependency-checker');
     const manifest = checker.readManifest(appPath);
-    const isBundled = fs.existsSync(path.join(appBasePath, 'runtime', 'R'));
+    const isBundled = !!(config && config.runtime_rscript) ||
+      fs.existsSync(path.join(appBasePath, 'runtime', 'R'));
 
     if (!isBundled && manifest && manifest.packages && manifest.packages.length > 0) {
       this.emit('status', { phase: 'checking_packages', message: 'Checking R packages...' });
@@ -457,8 +465,12 @@ class NativeRBackend extends EventEmitter {
       let settled = false;
       const settle = (fn, arg) => { if (settled) return; settled = true; fn(arg); };
 
-      // Resolve library path -- check for bundled library first
-      const bundledLib = path.join(appBasePath, 'runtime', 'R', 'library');
+      // Resolve library path -- check for bundled library first. A selected
+      // runtime pack passes its own library explicitly.
+      const configuredLib = config && config.runtime_library;
+      const bundledLib = (configuredLib && fs.existsSync(configuredLib))
+        ? configuredLib
+        : path.join(appBasePath, 'runtime', 'R', 'library');
       const checker2 = require('./dependency-checker');
       const userLibPath = checker2.resolveLibPath(config?.app_slug || 'default', config, checker2.readPreferences(config?.app_slug || 'default'));
 

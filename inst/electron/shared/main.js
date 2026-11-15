@@ -198,6 +198,13 @@ function bundledRuntimeLibrary() {
   return path.join(base, 'runtime', 'R', 'library');
 }
 
+// Runtime root contains the portable R itself; its library is the sibling
+// runtime/R/library. Keeping the root lets appstore locate Rscript and pass the
+// exact runtime to a future side-by-side runtime pack.
+function bundledRuntimeRoot() {
+  return path.dirname(bundledRuntimeLibrary());
+}
+
 // Local-only crash capture (opt-in). Uncaught main-process errors are written
 // to <logDir>/crashes/. Nothing is ever uploaded.
 let crashHandlersInstalled = false;
@@ -306,11 +313,28 @@ function reportAppContext(appId) {
   // Catalog installs do not store the archive hash in state.json; the catalog
   // artifact carries it, so use that as a fallback.
   const artifact = ce && ce.artifacts && ce.artifacts[platformKey()];
+  const runtimeId = (ins && ins.runtime) || '';
+  const rAbi = (ins && ins.r_abi) || (artifact && artifact.r_abi) || (ce && ce.r_abi) || '';
+  let runtimeVersion = '';
+  let runtimeSource = '';
+  if (appStore && runtimeId && appStore.runtimeInfo) {
+    try {
+      const rt = appStore.runtimeInfo(runtimeId);
+      if (rt) {
+        runtimeVersion = rt.version || '';
+        runtimeSource = rt.source || '';
+      }
+    } catch (e) { /* diagnostics are best-effort */ }
+  }
   return {
     appVersion: (ins && ins.version) || '',
     catalogVersion: (ce && ce.version) || '',
     bundleSha256: (ins && ins.sha256) || (artifact && artifact.sha256) || '',
-    installSource: (ins && ins.source) || ''
+    installSource: (ins && ins.source) || '',
+    runtimeId: runtimeId,
+    rAbi: rAbi,
+    runtimeVersion: runtimeVersion,
+    runtimeSource: runtimeSource
   };
 }
 
@@ -328,7 +352,11 @@ function reportAppChoices() {
         version: ctx.appVersion,
         catalogVersion: ctx.catalogVersion,
         bundleSha256: ctx.bundleSha256,
-        installSource: ctx.installSource
+        installSource: ctx.installSource,
+        runtimeId: ctx.runtimeId,
+        rAbi: ctx.rAbi,
+        runtimeVersion: ctx.runtimeVersion,
+        runtimeSource: ctx.runtimeSource
       });
     }
   }
@@ -357,6 +385,9 @@ function reportFingerprint(payload) {
     payload.appId,
     payload.appVersion,
     payload.platform,
+    payload.runtimeId || '',
+    payload.rAbi || '',
+    payload.runtimeVersion || '',
     payload.phase,
     String(payload.exitCode ?? ''),
     payload.signal || '',
@@ -376,6 +407,16 @@ function buildLaunchReport(incident) {
     installSource: ctx.installSource,
     shellVersion: app.getVersion(),
     rVersion: SHELL_R_VERSION || '',
+    runtimeId: ctx.runtimeId || '',
+    rAbi: ctx.rAbi || '',
+    runtimeVersion: ctx.runtimeVersion || '',
+    runtimeSource: ctx.runtimeSource || '',
+    installedRuntimes: (function () {
+      try {
+        const st = appStore && appStore.getState ? appStore.getState() : null;
+        return Object.keys((st && st.runtimes) || {});
+      } catch (e) { return []; }
+    })(),
     platform: platformKey(),
     os: os.type() + ' ' + os.release() + ' (' + os.arch() + ')',
     phase: incident.phase || 'pre_ready_failure',
@@ -395,6 +436,11 @@ function launchReportText(payload) {
     'ShinyApps launch report',
     'app: ' + payload.appId + ' ' + (payload.appVersion || ''),
     'platform: ' + payload.platform + '  shell: ' + payload.shellVersion + '  R: ' + payload.rVersion,
+    'runtime: ' + (payload.runtimeId || 'unknown') +
+      '  ABI: ' + (payload.rAbi || 'unknown') +
+      '  R: ' + (payload.runtimeVersion || 'unknown') +
+      '  source: ' + (payload.runtimeSource || 'unknown'),
+    'installed runtimes: ' + ((payload.installedRuntimes || []).join(', ') || 'unknown'),
     'catalog: ' + (payload.catalogVersion || 'unknown') +
       '  bundle: ' + (payload.bundleSha256 ? String(payload.bundleSha256).slice(0, 12) : 'unknown') +
       '  source: ' + (payload.installSource || 'unknown'),
@@ -630,6 +676,10 @@ ipcMain.on('report-action', async (_event, data) => {
         payload.catalogVersion = chosen.catalogVersion || '';
         payload.bundleSha256 = chosen.bundleSha256 || '';
         payload.installSource = chosen.installSource || '';
+        payload.runtimeId = chosen.runtimeId || '';
+        payload.rAbi = chosen.rAbi || '';
+        payload.runtimeVersion = chosen.runtimeVersion || '';
+        payload.runtimeSource = chosen.runtimeSource || '';
         payload.logTail = incoming.includeLog === false ? '' : readLogTail(chosen.id);
       }
     } else if (incoming.includeLog === false) {
@@ -3065,6 +3115,11 @@ function createWindow() {
       var win = ensureAppWindow(opts.appId);
       var view = appView;
       openAppLog(opts.appId);
+      appLogWrite('[runtime] id=' + (opts.runtimeId || '') +
+        ' abi=' + (opts.runtimeAbi || '') +
+        ' version=' + (opts.runtimeVersion || '') +
+        ' rscript=' + (opts.runtimeRscript || '') +
+        ' library=' + (opts.runtimeLibrary || ''));
       sendChromeStatus({
         state: 'starting',
         message: 'Starting ' + ((appMetaFor(opts.appId) || {}).name || opts.appId) + '…'
@@ -3188,7 +3243,13 @@ function createWindow() {
           app_type: 'r-shiny',
           app_id: opts.appId,
           runtime_strategy: 'bundled',
-          extra_lib_paths: opts.libPaths
+          extra_lib_paths: opts.libPaths,
+          runtime_id: opts.runtimeId || '',
+          runtime_abi: opts.runtimeAbi || '',
+          runtime_version: opts.runtimeVersion || '',
+          runtime_path: opts.runtimePath || '',
+          runtime_rscript: opts.runtimeRscript || '',
+          runtime_library: opts.runtimeLibrary || ''
         })
       }).then(function (result) {
         actualPort = result.port;
@@ -3255,6 +3316,7 @@ function createWindow() {
       shellVersion: '{{{app_version_js}}}',
       shellRVersion: SHELL_R_VERSION,
       runtimeLibrary: bundledRuntimeLibrary(),
+      runtimeRoot: bundledRuntimeRoot(),
       getDownloadMirror: function () { return appSettings.downloadMirror || ''; },
       log: function (m) { log('info', '[store]', m); }
     });
@@ -3284,11 +3346,23 @@ function createWindow() {
         // Trust the filesystem, not just state.json: an install whose folder is
         // gone must show as "not installed" instead of an unlaunchable card.
         const ins = appStore.isInstalled(a.id) ? st.apps[a.id] : null;
-        // Only a platform with a published bundle can be installed/updated here.
-        const art = a.artifacts && a.artifacts[plat];
-        const platformOk = !a.artifacts || !!art;
+        const selectedRuntime = (appStore && appStore.runtimeForEntry)
+          ? appStore.runtimeForEntry(a, ins && ins.runtime)
+          : null;
+        // Only a platform with a published bundle for a usable runtime can be
+        // installed/updated here; a legacy flat artifact remains a fallback.
+        const selectedArtifact = (appStore && appStore.artifactForEntry)
+          ? appStore.artifactForEntry(a, plat, ins && ins.runtime)
+          : (a.artifacts && a.artifacts[plat]);
+        const art = selectedArtifact || (a.artifacts && a.artifacts[plat]);
+        const platformOk = (!a.artifacts && !a.artifacts_by_runtime) ? true : !!art;
+        const entryAbi = (selectedRuntime && (selectedRuntime.artifactAbi || selectedRuntime.abi)) ||
+          a.r_abi ||
+          ((a.r_version || '').split('.').slice(0, 2).join('.'));
         const incompatible = !!(
-          (SHELL_R_VERSION && a.r_version && cmpVersion(SHELL_R_VERSION, a.r_version) < 0) ||
+          !selectedRuntime ||
+          (selectedRuntime.version && selectedRuntime.artifactRVersion &&
+            cmpVersion(selectedRuntime.version, selectedRuntime.artifactRVersion) < 0) ||
           (a.min_shell_version && cmpVersion('{{{app_version_js}}}', a.min_shell_version) < 0)
         );
         // A URL-installed app keeps its original source link; catalog apps use
@@ -3314,6 +3388,7 @@ function createWindow() {
           size: (art && art.size) || 0,
           license: a.license || '',
           rVersion: a.r_version || '',
+          rAbi: entryAbi,
           minShellVersion: a.min_shell_version || '',
           incompatible: incompatible,
           hasDownloadLink: !!downloadLinkKind,
@@ -3345,6 +3420,7 @@ function createWindow() {
           running: appStore.isRunning(id),
           tags: [], available: true, size: 0,
           license: lm.license || '', rVersion: lm.rVersion || '',
+          rAbi: lm.rAbi || '',
           minShellVersion: '', incompatible: false,
           hasDownloadLink: !!sourceUrl,
           hasMirrorLink: false,
@@ -3389,7 +3465,9 @@ function createWindow() {
         if (!entry && appStore) {
           try { await appStore.fetchCatalog(); entry = appStore.catalogEntry(appId); } catch (e) { /* offline */ }
         }
-        const art = entry && entry.artifacts && entry.artifacts[platformKey()];
+        const art = (entry && appStore.artifactForEntry)
+          ? appStore.artifactForEntry(entry, platformKey(), ins && ins.runtime)
+          : (entry && entry.artifacts && entry.artifacts[platformKey()]);
         if (!art || !art.url) return { ok: false, error: 'No bundle is published for this platform' };
         if (mirror) {
           if (!appSettings.downloadMirror) return { ok: false, error: 'No download mirror is configured' };
@@ -3427,6 +3505,9 @@ function createWindow() {
         L.push('app: ' + id);
         if (ins) {
           L.push('installed: v' + ins.version + '  source: ' + (ins.source || '?') + '  platform: ' + (ins.platform || '?'));
+          L.push('runtime: ' + (ins.runtime || '(none)') + '  ABI: ' + (ins.r_abi || '?'));
+          const rt = (ins.runtime && appStore && appStore.runtimeInfo) ? appStore.runtimeInfo(ins.runtime) : null;
+          if (rt) L.push('runtime version: ' + (rt.version || '?') + '  source: ' + (rt.source || '?'));
           L.push('packages: ' + ((ins.packages || []).join(', ') || '(none)'));
         } else {
           L.push('installed: no');
