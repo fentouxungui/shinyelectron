@@ -1376,11 +1376,15 @@ function emitTaskProgress(task, pp) {
   sendStoreStatus({
     id: task.appId, taskId: task.taskId, state: 'installing', op: task.op,
     percent: task.percent, statusText: task.statusText, step: task.step,
+    name: task.displayName || '', description: task.displayDescription || '',
   });
 }
 function launchStoreTask(task) {
   task.state = 'running';
-  sendStoreStatus({ id: task.appId, taskId: task.taskId, state: 'installing', op: task.op, statusText: 'starting…' });
+  sendStoreStatus({
+    id: task.appId, taskId: task.taskId, state: 'installing', op: task.op,
+    statusText: 'starting…', name: task.displayName || '', description: task.displayDescription || '',
+  });
   task.promise = Promise.resolve()
     .then(function () { return task.run(task); })
     .then(
@@ -1441,11 +1445,15 @@ function registerStoreTask(opts) {
     state: 'queued', percent: 0, statusText: 'queued', step: 'queued',
     error: '', cancelled: false, controller: controller, signal: controller.signal,
     run: opts.run, promise: null, lastAt: 0, lastPhase: '',
+    displayName: opts.displayName || '', displayDescription: opts.displayDescription || '',
   };
   storeTasks.set(taskId, task);
   if (opts.immediate) launchStoreTask(task);
   else {
-    sendStoreStatus({ id: task.appId, taskId: taskId, state: 'queued', op: task.op, statusText: 'queued' });
+    sendStoreStatus({
+      id: task.appId, taskId: taskId, state: 'queued', op: task.op,
+      statusText: 'queued', name: task.displayName || '', description: task.displayDescription || '',
+    });
     pumpStoreTasks();
   }
   return task;
@@ -2345,28 +2353,6 @@ function storeCommand(payload) {
   }
 }
 
-// Top-level Settings menu: one item per store function. Input-style items open a
-// focused dialog in the launcher instead of one crowded sheet.
-function toggleMetricsOverlay() {
-  appSettings.metricsOverlay = !metricsEnabled();
-  saveSettings();
-  createMenu();
-  if (metricsEnabled()) {
-    metricsTick();
-  } else if (mainWindow && !mainWindow.isDestroyed()) {
-    // Drop the suffix immediately. On an app page keep the app name; on a
-    // non-app page hand the title back to the page.
-    var wc = contentWebContents();
-    var onAppPage = false;
-    try { onAppPage = !!(wc && /^https?:/i.test(wc.getURL() || '')); } catch (e) {}
-    if (onAppPage) {
-      setWindowTitleForApp((currentAppMeta && currentAppMeta.id) || lastSelectedAppId || '', true);
-    } else {
-      restorePageTitle(true);
-    }
-  }
-}
-
 // Open the launcher's manager on a given tab (deep link from the Apps menu).
 function openManagerFromMenu(tab) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2590,9 +2576,7 @@ function createMenu() {
         { role: 'zoomIn' },
         { role: 'zoomOut' },
         { type: 'separator' },
-        { role: 'togglefullscreen' },
-        { type: 'separator' },
-        { label: (metricsEnabled() ? '✓ ' : '') + 'Show CPU/RAM in Title Bar', click: toggleMetricsOverlay }
+        { role: 'togglefullscreen' }
       ]
     },
     {
@@ -3430,9 +3414,37 @@ function createWindow() {
           state: 'installed'
         });
       });
-      // Background tasks let the launcher render the Installing tab and
-      // restore per-app progress after a reload. Bundles are tracked by their
-      // own status events and are omitted here.
+      // Bundle installs are user-picked files, not catalog entries. Expose the
+      // active one as a synthetic transient app so the Installing section can
+      // render progress and its own Cancel button. The normal tasks array still
+      // carries per-catalog-app progress only.
+      const bundleTask = activeStoreTasks().find(function (t) {
+        return t.op === 'install_bundle';
+      });
+      if (bundleTask) {
+        list.push({
+          id: '__bundle__',
+          name: bundleTask.displayName || 'Bundle install',
+          description: bundleTask.displayDescription || 'Installing a local bundle',
+          icon: '', author: '', homepage: '', docs: '',
+          catalogVersion: '', installed: false, installedVersion: null,
+          updateAvailable: false, running: false, tags: [],
+          available: true, size: 0,
+          license: '', rVersion: '', rAbi: '', minShellVersion: '',
+          incompatible: false,
+          hasDownloadLink: false, hasMirrorLink: false,
+          downloadLinkKind: '', downloadPlatformLabel: '',
+          transient: true,
+          state: bundleTask.state === 'running' ? 'installing' : bundleTask.state,
+          taskId: bundleTask.taskId,
+          op: bundleTask.op,
+          percent: bundleTask.percent,
+          statusText: bundleTask.statusText,
+          step: bundleTask.step
+        });
+      }
+      // Background tasks let the launcher restore per-catalog-app progress after
+      // a reload. Bundle tasks are represented by the synthetic app above.
       const tasks = activeStoreTasks()
         .filter(function (t) { return t.appId !== '__bundle__'; })
         .map(publicStoreTask);
@@ -3615,9 +3627,6 @@ function createWindow() {
   ipcMain.handle('set-metrics-overlay', async (_event, on) => {
     appSettings.metricsOverlay = !!on;
     saveSettings();
-    {{#menu_enabled}}
-    try { createMenu(); } catch (e) { /* menu is best-effort */ }
-    {{/menu_enabled}}
     if (appSettings.metricsOverlay) {
       metricsTick();
     } else if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4148,8 +4157,18 @@ function createWindow() {
       // installs keep running in parallel.
       registerStoreTask({
         appId: '__bundle__', op: 'install_bundle', priority: 3, immediate: true,
+        displayName: 'Bundle install',
+        displayDescription: bundleUrl ? 'Downloading a bundle from URL' : 'Installing a local bundle',
         run: async function (task) {
           const confirmBundle = async function (m) {
+            task.displayName = (m.name || m.id) + (m.version ? ' ' + m.version : '');
+            task.displayDescription = (bundleUrl ? 'URL bundle · ' : 'Local bundle · ') +
+              (m.id || '') + (m.version ? ' ' + m.version : '');
+            sendStoreStatus({
+              id: '__bundle__', taskId: task.taskId, state: 'installing',
+              op: 'install_bundle', statusText: 'awaiting confirmation',
+              name: task.displayName, description: task.displayDescription,
+            });
             const detail = [
               'Platform: ' + m.platform,
               m.r_version ? 'Requires R ' + m.r_version : '',

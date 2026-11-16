@@ -311,7 +311,12 @@
       letter-spacing: .05em; color: var(--muted);
     }
     .list-header .h-actions { text-align: right; }
-    .empty { margin: 72px auto; max-width: 460px; text-align: center; color: var(--muted); font-size: var(--text-ui); line-height: 1.55; }
+    .empty {
+      display: flex; flex-direction: column; align-items: center;
+      margin: 72px auto; max-width: 460px; text-align: center;
+      color: var(--muted); font-size: var(--text-ui); line-height: 1.55;
+    }
+    .empty[hidden] { display: none; }
     .empty .btn { margin-top: 16px; }
     .empty .status { color: var(--muted); }
 
@@ -733,6 +738,46 @@
     var bundleStatus = '';
     var bundlePercent = 0;
 
+    // A local/URL bundle is a task without a catalog app. Keep a transient
+    // model row so the Installing section can render its progress and Cancel.
+    function ensureBundleTask(ev) {
+      var b = byId['__bundle__'];
+      if (!b) {
+        b = {
+          id: '__bundle__',
+          name: (ev && ev.name) || 'Bundle install',
+          description: (ev && ev.description) || 'Installing a local bundle',
+          icon: '', author: '', homepage: '', docs: '',
+          catalogVersion: '', installed: false, installedVersion: null,
+          updateAvailable: false, running: false, tags: [],
+          available: true, size: 0,
+          license: '', rVersion: '', rAbi: '', minShellVersion: '',
+          incompatible: false,
+          hasDownloadLink: false, hasMirrorLink: false,
+          downloadLinkKind: '', downloadPlatformLabel: '',
+          transient: true, state: 'installing'
+        };
+        byId[b.id] = b;
+        model.push(b);
+      }
+      if (ev) {
+        if (ev.name) b.name = ev.name;
+        if (ev.description) b.description = ev.description;
+        if (ev.taskId) b.taskId = ev.taskId;
+        if (ev.op) b.op = ev.op;
+        if (ev.state) b.state = ev.state;
+        if (typeof ev.percent === 'number') b.percent = ev.percent;
+        if (ev.statusText) b.statusText = ev.statusText;
+        if (ev.step) b.step = ev.step;
+      }
+      return b;
+    }
+    function removeBundleTask() {
+      if (!byId['__bundle__']) return;
+      delete byId['__bundle__'];
+      model = model.filter(function (a) { return a.id !== '__bundle__'; });
+    }
+
     function sortByName(list) {
       return list.slice().sort(function (a, b) {
         return String(a.name || a.id).localeCompare(String(b.name || b.id));
@@ -761,6 +806,7 @@
     }
 
     function matchesFilters(app) {
+      if (app.transient) return true;
       if (selectedTag && (app.tags || []).indexOf(selectedTag) === -1) return false;
       if (!query) return true;
       var q = query.toLowerCase();
@@ -779,15 +825,17 @@
 
     function currentList() {
       var base;
+      var persistent = model.filter(function (a) { return !a.transient; });
       // The top-bar search is global: it searches the whole catalog regardless
-      // of the section currently selected.
-      if (query) base = model.slice();
+      // of the section currently selected. Transient install rows belong only
+      // to Installing.
+      if (query) base = persistent;
       else if (section === 'installed') base = installedList();
       else if (section === 'installing') base = installingList();
       else if (section === 'updates') base = updatesList();
       else if (section === 'running') base = runningList();
-      else base = model.slice();
-      if (favOnly) base = base.filter(function (a) { return isFav(a.id); });
+      else base = persistent;
+      if (favOnly) base = base.filter(function (a) { return a.transient || isFav(a.id); });
       return sortList(base.filter(matchesFilters));
     }
 
@@ -801,7 +849,7 @@
     }
 
     function countFor(t) {
-      if (t === 'discover') return model.length;
+      if (t === 'discover') return model.filter(function (a) { return !a.transient; }).length;
       if (t === 'installed') return installedList().length;
       if (t === 'installing') return installingList().length;
       if (t === 'updates') return updatesList().length;
@@ -936,15 +984,17 @@
       var name = document.createElement('div');
       name.className = 'app-name';
       name.textContent = app.name || app.id;
-      name.setAttribute('role', 'button');
-      name.tabIndex = 0;
-      name.title = 'View details';
-      name.addEventListener('click', function (ev) { ev.stopPropagation(); openAppDrawer(app.id); });
-      name.addEventListener('keydown', function (ev) {
-        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openAppDrawer(app.id); }
-      });
+      if (!app.transient) {
+        name.setAttribute('role', 'button');
+        name.tabIndex = 0;
+        name.title = 'View details';
+        name.addEventListener('click', function (ev) { ev.stopPropagation(); openAppDrawer(app.id); });
+        name.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openAppDrawer(app.id); }
+        });
+      }
       row.appendChild(name);
-      row.appendChild(makeFavButton(app));
+      if (!app.transient) row.appendChild(makeFavButton(app));
       if (app.homepage) {
         var link = document.createElement('button');
         link.type = 'button';
@@ -1196,6 +1246,8 @@
     function makeActions(app) {
       var actions = document.createElement('div');
       actions.className = 'card-actions';
+      // A transient bundle-install row carries only progress + Cancel.
+      if (app.transient) return actions;
       if (!window.lifecycle) return actions;
       // Only this app's own task disables its actions; background installs of
       // other apps no longer freeze the store. While one app runs, every other
@@ -1373,7 +1425,7 @@
         var btext = document.createElement('span');
         btext.style.flex = '1';
         if (bundleBusy) {
-          btext.textContent = 'Installing a local bundle \u2014 ' + (bundleStatus || 'working\u2026');
+          btext.textContent = 'Installing a bundle \u2014 ' + (bundleStatus || 'working\u2026');
         } else if (activeInstalls.length === 1) {
           var ba = activeInstalls[0];
           btext.textContent = opVerb(ba.op) + ' ' + (ba.name || 'an app') +
@@ -1391,6 +1443,12 @@
           bi.style.width = bundlePercent + '%';
           bp.appendChild(bi);
           busybar.appendChild(bp);
+        }
+        var bundleRow = byId['__bundle__'];
+        if (bundleRow && bundleRow.taskId && window.lifecycle && window.lifecycle.cancelInstall) {
+          busybar.appendChild(makeButton('Cancel', '', function () {
+            window.lifecycle.cancelInstall(bundleRow.taskId);
+          }));
         }
         busybar.appendChild(makeButton('View', '', function () { setSection('installing'); }));
       }
@@ -1507,8 +1565,9 @@
     function rebuildSideTags() {
       var host = document.getElementById('side-tags');
       if (!host) return;
+      var persistent = model.filter(function (a) { return !a.transient; });
       var counts = {};
-      model.forEach(function (a) {
+      persistent.forEach(function (a) {
         (a.tags || []).forEach(function (t) { counts[t] = (counts[t] || 0) + 1; });
       });
       var names = Object.keys(counts).sort(function (a, b) {
@@ -1523,7 +1582,7 @@
         host.appendChild(empty);
         return;
       }
-      host.appendChild(makeTagButton('All apps', '', model.length));
+      host.appendChild(makeTagButton('All apps', '', persistent.length));
       names.forEach(function (t) { host.appendChild(makeTagButton(t, t, counts[t])); });
     }
 
@@ -2468,10 +2527,23 @@
           return;
         }
         if (ev.id === '__bundle__') {
-          if (ev.state === 'installing') { bundleBusy = true; bundleStatus = ev.statusText || ev.step || ''; if (typeof ev.percent === 'number') bundlePercent = ev.percent; render(); return; }
+          if (ev.state === 'installing' || ev.state === 'queued') {
+            bundleBusy = true;
+            bundleStatus = ev.statusText || ev.step || '';
+            if (typeof ev.percent === 'number') bundlePercent = ev.percent;
+            var hadBundle = !!byId['__bundle__'];
+            var nameChanged = !hadBundle || (ev.name && ev.name !== byId['__bundle__'].name);
+            var bundleApp = ensureBundleTask(ev);
+            // Progress ticks update one row; a new row or a manifest name
+            // change needs a full render.
+            if (hadBundle && !nameChanged) updateCardProgress(bundleApp);
+            else render();
+            return;
+          }
           bundleBusy = false;
           bundleStatus = '';
           bundlePercent = 0;
+          removeBundleTask();
           if (ev.state === 'error' && ev.cancelled) {
             render();
             showToast('Bundle install cancelled');
