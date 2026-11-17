@@ -10,13 +10,14 @@
       --canvas: {{brand_background}};
       --surface: color-mix(in srgb, var(--canvas) 35%, #ffffff 65%);
       --surface-2: color-mix(in srgb, var(--canvas) 62%, #ffffff 38%);
-      --sidebar: color-mix(in srgb, var(--canvas) 86%, #191b1c 14%);
-      --ink: #191b1c;
-      --ink-2: #3d3f40;
-      --muted: #5f5c56;
+      --sidebar: color-mix(in srgb, var(--canvas) 88%, #0B1626 12%);
+      --ink: #0B1626;
+      --ink-2: #33455F;
+      --muted: #5B7089;
       --line: color-mix(in srgb, var(--ink) 13%, transparent);
       --line-strong: color-mix(in srgb, var(--ink) 23%, transparent);
-      --accent: {{brand_primary}};
+      /* Brand blue, deepened just enough for accent text to clear AA on paper. */
+      --accent: color-mix(in srgb, {{brand_primary}} 88%, #0B1626);
       --accent-ink: #ffffff;
       --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--surface));
       --ok: #1c7147;
@@ -42,17 +43,17 @@
     }
     :root[data-theme="dark"] {
       color-scheme: dark;
-      --canvas: #151617;
-      --surface: #1c1e1f;
-      --surface-2: #222526;
-      --sidebar: #191b1c;
-      --ink: #f1eee7;
-      --ink-2: #cfcbc2;
-      --muted: #a6a198;
-      --line: color-mix(in srgb, var(--ink) 14%, transparent);
-      --line-strong: color-mix(in srgb, var(--ink) 26%, transparent);
-      --accent: color-mix(in srgb, {{brand_primary}} 58%, #ffffff);
-      --accent-ink: #101214;
+      --canvas: #0B1626;
+      --surface: #0F1D31;
+      --surface-2: #142641;
+      --sidebar: #08111F;
+      --ink: #EAF2FF;
+      --ink-2: #C7DAF2;
+      --muted: #8FB0D8;
+      --line: color-mix(in srgb, var(--ink) 13%, transparent);
+      --line-strong: color-mix(in srgb, var(--ink) 24%, transparent);
+      --accent: color-mix(in srgb, {{brand_primary}} 62%, #ffffff);
+      --accent-ink: #07111F;
       --accent-soft: color-mix(in srgb, var(--accent) 17%, var(--surface));
       --ok: #6fd39b;
       --ok-soft: color-mix(in srgb, var(--ok) 14%, var(--surface));
@@ -101,11 +102,10 @@
     }
     .brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px 0; min-width: 0; }
     .brand-mark {
-      flex: 0 0 auto; width: 30px; height: 30px; display: grid; place-items: center;
-      color: var(--accent); background: var(--surface);
-      border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow-1);
+      flex: 0 0 auto; width: 32px; height: 32px; display: grid; place-items: center;
+      background: transparent; border: 0; border-radius: 9px;
     }
-    .brand-mark svg { width: 17px; height: 17px; }
+    .brand-mark svg { width: 30px; height: 30px; }
     .brand-name { font-size: 14.5px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .brand-name em { font-style: normal; font-weight: 500; color: var(--muted); }
     .nav { display: flex; flex-direction: column; gap: 2px; }
@@ -487,11 +487,20 @@
     <aside class="sidebar" aria-label="Store navigation">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none">
-            <rect x="3.5" y="4" width="7" height="7" rx="2" fill="currentColor"/>
-            <rect x="13.5" y="4" width="7" height="7" rx="2" fill="currentColor" opacity=".45"/>
-            <rect x="3.5" y="14" width="7" height="7" rx="2" fill="currentColor" opacity=".45"/>
-            <rect x="13.5" y="14" width="7" height="7" rx="2" fill="currentColor"/>
+          <!-- ShinyApps symbol, simplified for the sidebar: hex bag, no R, no spark. -->
+          <svg viewBox="-125 -141 250 250" fill="none">
+            <defs>
+              <linearGradient id="saHex" gradientUnits="userSpaceOnUse" x1="-110" y1="-132" x2="112" y2="112">
+                <stop offset="0" stop-color="#79DCFF"/>
+                <stop offset=".5" stop-color="#2F6BFF"/>
+                <stop offset="1" stop-color="#1A3BB4"/>
+              </linearGradient>
+            </defs>
+            <path d="M -40 -84 A 40 40 0 0 1 40 -84" stroke="url(#saHex)" stroke-width="14" stroke-linecap="round"/>
+            <path d="M -50 -86.6 L -100 0 L -50 86.6 L 50 86.6 L 100 0 L 50 -86.6 Z" fill="url(#saHex)" stroke="url(#saHex)" stroke-width="22" stroke-linejoin="round"/>
+            <path d="M -100 0 L -50 -86.6 L -50 0 Z" fill="#fff" opacity=".12"/>
+            <path d="M 100 0 L 50 -86.6 L 50 0 Z" fill="#000" opacity=".12"/>
+            <path d="M -88 7 L -38 -79" stroke="#fff" stroke-opacity=".45" stroke-width="5" stroke-linecap="round"/>
           </svg>
         </span>
         <span class="brand-name">{{launcher_title}}</span>

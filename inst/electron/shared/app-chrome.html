@@ -10,12 +10,13 @@
       --canvas: {{brand_background}};
       --surface: color-mix(in srgb, var(--canvas) 35%, #ffffff 65%);
       --surface-2: color-mix(in srgb, var(--canvas) 62%, #ffffff 38%);
-      --ink: #191b1c;
-      --ink-2: #3d3f40;
-      --muted: #5f5c56;
+      --ink: #0B1626;
+      --ink-2: #33455F;
+      --muted: #5B7089;
       --line: color-mix(in srgb, var(--ink) 13%, transparent);
       --line-strong: color-mix(in srgb, var(--ink) 23%, transparent);
-      --accent: {{brand_primary}};
+      /* Brand blue, deepened just enough for accent text to clear AA on paper. */
+      --accent: color-mix(in srgb, {{brand_primary}} 88%, #0B1626);
       --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--surface));
       --ok: #1c7147;
       --warn: #8a5300;
@@ -24,15 +25,15 @@
     }
     :root[data-theme="dark"] {
       color-scheme: dark;
-      --canvas: #151617;
-      --surface: #1c1e1f;
-      --surface-2: #222526;
-      --ink: #f1eee7;
-      --ink-2: #cfcbc2;
-      --muted: #a6a198;
-      --line: color-mix(in srgb, var(--ink) 14%, transparent);
-      --line-strong: color-mix(in srgb, var(--ink) 26%, transparent);
-      --accent: color-mix(in srgb, {{brand_primary}} 58%, #ffffff);
+      --canvas: #0B1626;
+      --surface: #0F1D31;
+      --surface-2: #142641;
+      --ink: #EAF2FF;
+      --ink-2: #C7DAF2;
+      --muted: #8FB0D8;
+      --line: color-mix(in srgb, var(--ink) 13%, transparent);
+      --line-strong: color-mix(in srgb, var(--ink) 24%, transparent);
+      --accent: color-mix(in srgb, {{brand_primary}} 62%, #ffffff);
       --accent-soft: color-mix(in srgb, var(--accent) 17%, var(--surface));
       --ok: #6fd39b;
       --warn: #f0bd6b;
