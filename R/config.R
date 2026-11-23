@@ -28,7 +28,10 @@ default_config <- function() {
       type = NULL,
       runtime_strategy = NULL,
       platforms = NULL,
-      architectures = NULL
+      architectures = NULL,
+      # Installer size controls; NULL keeps electron-builder's defaults.
+      compression = NULL,
+      electron_languages = NULL
     ),
     window = list(
       width = SHINYELECTRON_DEFAULTS$window_width,
@@ -329,6 +332,12 @@ merge_config_deep <- function(defaults, config) {
 #' `installer.one_click: false`, because falling back to a default would
 #' build a different installer than the one requested.
 #'
+#' `build.compression` and `build.electron_languages` are size controls: an
+#' unknown compression level or an unusable locale code warns and is dropped,
+#' so the build keeps electron-builder's defaults instead of failing.
+#' `en-US` is added to `build.electron_languages` when it is missing, since
+#' Chromium falls back to that pack.
+#'
 #' @param config List of configuration values
 #' @return List of validated configuration
 #' @keywords internal
@@ -370,6 +379,43 @@ validate_config <- function(config) {
       "i" = "Falling back to {.val shinylive}"
     ))
     config$build$runtime_strategy <- NULL
+  }
+
+  # Validate the installer size controls. An unknown compression level warns
+  # and falls back to electron-builder's own default; locale codes are
+  # normalized to a character vector, and en-US is always kept because it is
+  # the pack Chromium falls back to.
+  valid_compression <- c("store", "normal", "maximum")
+  if (!is.null(config$build$compression) &&
+      !(is.character(config$build$compression) &&
+        length(config$build$compression) == 1L &&
+        config$build$compression %in% valid_compression)) {
+    cli::cli_warn(c(
+      "Invalid build.compression in config: {.val {config$build$compression}}",
+      "i" = "Valid levels: {.val {valid_compression}}",
+      "i" = "Leaving electron-builder's default in place"
+    ))
+    config$build$compression <- NULL
+  }
+
+  locales <- config$build$electron_languages
+  if (!is.null(locales)) {
+    locales <- unique(trimws(as.character(unlist(locales, use.names = FALSE))))
+    ok <- nzchar(locales) & grepl("^[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$", locales)
+    if (!all(ok)) {
+      cli::cli_warn(c(
+        "Invalid locale(s) in {.field build.electron_languages}: {.val {locales[!ok]}}",
+        "i" = "Use Chromium locale codes such as {.val en-US} or {.val zh-CN}"
+      ))
+      locales <- locales[ok]
+    }
+    if (length(locales) > 0 && !"en-US" %in% locales) {
+      cli::cli_inform(c(
+        "i" = "Adding {.val en-US} to {.field build.electron_languages}: Chromium falls back to it"
+      ))
+      locales <- c("en-US", locales)
+    }
+    config$build$electron_languages <- if (length(locales) > 0) locales else NULL
   }
 
   # Validate platforms and architectures, the targets export() builds for.
@@ -773,6 +819,9 @@ build:
   # architectures:
   #   - x64
   #   - arm64
+  # Installer size controls (optional).
+  # compression: "normal"           # "store", "normal" or "maximum"
+  # electron_languages: [en-US]     # Chromium locale packs to ship; "en-US" is always kept
 
 window:
   width: 1200

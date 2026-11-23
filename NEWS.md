@@ -2,6 +2,18 @@
 
 ## Breaking changes
 
+* The bundled R runtime is pruned further, so an installed app no longer
+  carries the help and vignette trees of its packages (`help/`, `doc/`,
+  `html/`), the base message catalogues (`po/`, the `translations` package)
+  or the Tcl/Tk runtime. About 63 MB of a bundled `r-shiny` runtime is gone
+  and nothing a running app needs was removed: every package still loads and
+  Shiny apps start normally. What changes is documentation on demand:
+  `?topic`, `example()`, `vignette()` and `tools::Rd_db()` now report that
+  nothing is installed, and `library(tcltk)` fails with "Tcl/Tk support files
+  were not installed" instead of opening Tk windows. An app that shows help
+  pages must ship them itself. `dependencies.r.prune: false` still keeps
+  everything.
+
 * A running store app no longer shows a toolbar under its title bar. The app
   page fills the whole window, so the app name, launch progress, Store button
   and Stop button are gone. Close the app window (the unsaved-work prompt still
@@ -65,6 +77,14 @@
   Check for Updates on the launcher, not Check for ShinyApps Updates.
 
 ## New features
+
+* Two optional build settings control installer size. `build.compression`
+  (`"store"`, `"normal"` or `"maximum"`) is passed to electron-builder, whose
+  default is used when it is unset. `build.electron_languages` lists the
+  Chromium locale packs to ship, as in `[en-US, zh-CN]`; unset ships all of
+  them, and `en-US` is always kept because Chromium falls back to it. Dropping
+  the other locale packs saves about 45 MB unpacked for an app that only needs
+  English and Chinese.
 
 * Quitting the shell now checks for work still in progress. When any app is
   running or any store task is still installing, it lists the running apps and

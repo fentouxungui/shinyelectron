@@ -20,4 +20,11 @@ does \code{installer.allow_to_change_installation_directory: true} without
 \code{installer.one_click: false}, because falling back to a default would
 build a different installer than the one requested.
 }
+\details{
+\code{build.compression} and \code{build.electron_languages} are size controls: an
+unknown compression level or an unusable locale code warns and is dropped,
+so the build keeps electron-builder's defaults instead of failing.
+\code{en-US} is added to \code{build.electron_languages} when it is missing, since
+Chromium falls back to that pack.
+}
 \keyword{internal}

@@ -8,8 +8,24 @@
   # Test suites, removed from every installed package: those in the bundled
   # library and the base and recommended packages in the portable R's library.
   package_dirs = c("tests", "testme", "tinytest"),
-  # R's own regression tests at the top of the portable R distribution.
-  r_home_dirs = "tests",
+  # Help and vignette trees, removed from every installed package. Nothing a
+  # running app reads lives there: no package in the bundled runtime calls
+  # system.file("help"), system.file("doc") or system.file("html"), so
+  # library() and the app itself are unaffected, while ?topic, example(),
+  # vignette() and tools::Rd_db() answer "nothing found" instead of showing
+  # documentation. They are also the least compressible files in the runtime,
+  # so they cost the most installer size per byte saved.
+  package_docs = c("help", "doc", "html"),
+  # Message catalogues of the base and recommended packages; without them R
+  # reports in English.
+  package_locales = "po",
+  # Whole packages that hold nothing but those localized messages.
+  packages = "translations",
+  # R's own regression tests, and the Tcl/Tk runtime that only the `tcltk`
+  # package loads. Shiny does not use Tk widgets, and an app that asks for them
+  # now stops with "Tcl/Tk support files were not installed" instead of
+  # opening a window.
+  r_home_dirs = c("tests", "Tcl"),
   # Manuals, HTML documentation, news and FAQs in the portable R's doc/. The
   # rest of doc/ stays: COPYRIGHTS carries third-party notices that binary
   # distributions of R must include, utils::getCRANmirrors() reads
@@ -113,10 +129,22 @@ is_real_dir <- function(path) {
 #' * From every installed package, both in the bundled library
 #'   (`runtime/R/library`) and among the base and recommended packages in the
 #'   portable R's own library: the test suites in `tests/`, `testme/` and
-#'   `tinytest/`.
+#'   `tinytest/`; the help and vignette trees in `help/`, `doc/` and
+#'   `html/`; and the message catalogues in `po/`.
+#' * The `translations` package, which holds nothing but localized messages
+#'   for the base and recommended packages.
 #' * From each portable R distribution (`runtime/R/portable-r-*`): R's
-#'   regression tests in `tests/`, and inside `doc/` the `html/` and `manual/`
-#'   directories plus R's news, FAQ, `CHANGES` and `README` files.
+#'   regression tests in `tests/`, the `Tcl/` runtime that only `tcltk` loads,
+#'   and inside `doc/` the `html/` and `manual/` directories plus R's news, FAQ,
+#'   `CHANGES` and `README` files.
+#'
+#' Removing the help and vignette trees costs no functionality in a running
+#' app: no package in the bundled runtime reads them through `system.file()`,
+#' and `library()` does not touch them. `?topic`, `example()`, `vignette()`
+#' and `tools::Rd_db()` report that no documentation is installed, and
+#' `library(tcltk)` fails with "Tcl/Tk support files were not installed"
+#' instead of opening Tk windows. An app that shows a help pane of its own must
+#' ship the pages it needs inside the app, not read them from the R library.
 #'
 #' Package `examples/`, `demo/`, NEWS and CHANGELOG files and `include/`
 #' headers are kept, because some packages and apps read them at runtime (for
@@ -154,15 +182,18 @@ prune_bundled_r_runtime <- function(runtime_dir, verbose = TRUE) {
   }
 
   libraries <- c(fs::path(runtime_dir, "library"), fs::path(r_homes, "library"))
+  pkg_dir_names <- c(allow$package_dirs, allow$package_docs, allow$package_locales)
   for (lib in libraries[is_real_dir(libraries)]) {
     for (pkg_dir in fs::dir_ls(lib, type = "directory")) {
-      total <- add(total, prune_r_paths(pkg_dir, dir_names = allow$package_dirs))
+      total <- add(total, prune_r_paths(pkg_dir, dir_names = pkg_dir_names))
     }
+    # Whole packages are removed from the library itself, not from inside one.
+    total <- add(total, prune_r_paths(lib, dir_names = allow$packages))
   }
 
   if (verbose && total$files > 0) {
     cli::cli_alert_info(
-      "Removed {total$files} test and documentation file{?s} ({round(total$bytes / 1024^2, 1)} MB) from the bundled R runtime"
+      "Removed {total$files} file{?s} that only serve tests, documentation or Tcl ({round(total$bytes / 1024^2, 1)} MB) from the bundled R runtime"
     )
   }
 

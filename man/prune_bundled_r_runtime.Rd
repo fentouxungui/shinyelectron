@@ -24,11 +24,23 @@ The allowlist covers:
 \item From every installed package, both in the bundled library
 (\code{runtime/R/library}) and among the base and recommended packages in the
 portable R's own library: the test suites in \verb{tests/}, \verb{testme/} and
-\verb{tinytest/}.
+\verb{tinytest/}; the help and vignette trees in \verb{help/}, \verb{doc/} and
+\verb{html/}; and the message catalogues in \verb{po/}.
+\item The \code{translations} package, which holds nothing but localized messages
+for the base and recommended packages.
 \item From each portable R distribution (\verb{runtime/R/portable-r-*}): R's
-regression tests in \verb{tests/}, and inside \verb{doc/} the \verb{html/} and \verb{manual/}
-directories plus R's news, FAQ, \code{CHANGES} and \code{README} files.
+regression tests in \verb{tests/}, the \verb{Tcl/} runtime that only \code{tcltk} loads,
+and inside \verb{doc/} the \verb{html/} and \verb{manual/} directories plus R's news, FAQ,
+\code{CHANGES} and \code{README} files.
 }
+
+Removing the help and vignette trees costs no functionality in a running
+app: no package in the bundled runtime reads them through \code{system.file()},
+and \code{library()} does not touch them. \code{?topic}, \code{example()}, \code{vignette()}
+and \code{tools::Rd_db()} report that no documentation is installed, and
+\code{library(tcltk)} fails with "Tcl/Tk support files were not installed"
+instead of opening Tk windows. An app that shows a help pane of its own must
+ship the pages it needs inside the app, not read them from the R library.
 
 Package \verb{examples/}, \verb{demo/}, NEWS and CHANGELOG files and \verb{include/}
 headers are kept, because some packages and apps read them at runtime (for

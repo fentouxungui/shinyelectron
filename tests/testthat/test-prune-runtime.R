@@ -9,7 +9,10 @@ local_runtime_fixture <- function(env = parent.frame()) {
       "DESCRIPTION", "NAMESPACE", "NEWS.md", "R/pkgA.rdb", "libs/pkgA.so",
       "help/pkgA.rdb", "include/pkgA.h", "examples/app.R", "demo/intro.R",
       "tests/testthat.R", "tests/testthat/test-a.R", "testme/test-b.R",
-      "tinytest/test-c.R"
+      "tinytest/test-c.R",
+      # Help, vignette and message-catalogue trees, removed since they only
+      # serve documentation on demand.
+      "doc/pkgA.html", "html/00Index.html", "po/en/LC_MESSAGES/pkgA.mo"
     )),
     # The portable R distribution (R_HOME).
     paste0("portable-r-9.9.9-macos-arm64/", c(
@@ -23,7 +26,12 @@ local_runtime_fixture <- function(env = parent.frame()) {
       # Base and recommended packages in the portable R's own library.
       "library/base/DESCRIPTION", "library/stats/DESCRIPTION",
       "library/stats/demo/nlm.R", "library/survival/DESCRIPTION",
-      "library/survival/NEWS.Rd", "library/survival/tests/survfit.R"
+      "library/survival/NEWS.Rd", "library/survival/tests/survfit.R",
+      "library/stats/help/stats.rdb",
+      # Localized base messages and the Tcl/Tk runtime.
+      "library/translations/DESCRIPTION",
+      "library/translations/en/LC_MESSAGES/R.mo",
+      "Tcl/bin/tcl86.dll", "Tcl/lib/tcl8.6/init.tcl"
     ))
   )
   for (f in file.path(root, files)) {
@@ -39,10 +47,12 @@ fixture_removed <- function(root) {
   pkg <- file.path(root, "library", "pkgA")
   r_home <- file.path(root, "portable-r-9.9.9-macos-arm64")
   c(
-    file.path(pkg, c("tests", "testme", "tinytest")),
+    file.path(pkg, c("tests", "testme", "tinytest", "help", "doc", "html", "po")),
     file.path(r_home, "tests"),
+    file.path(r_home, "Tcl"),
+    file.path(r_home, "library", "translations"),
     file.path(r_home, "doc", c("html", "manual", "NEWS", "NEWS.rds", "NEWS.pdf", "FAQ")),
-    file.path(r_home, "library", "survival", "tests")
+    file.path(r_home, "library", c("survival/tests", "stats/help"))
   )
 }
 
@@ -50,7 +60,7 @@ fixture_kept <- function(root) {
   pkg <- file.path(root, "library", "pkgA")
   r_home <- file.path(root, "portable-r-9.9.9-macos-arm64")
   c(
-    file.path(pkg, c("DESCRIPTION", "NAMESPACE", "NEWS.md", "R", "libs", "help",
+    file.path(pkg, c("DESCRIPTION", "NAMESPACE", "NEWS.md", "R", "libs",
                      "include", "examples", "demo")),
     file.path(r_home, c("COPYING", "bin", "include", "share")),
     file.path(r_home, "doc", c("COPYING", "COPYRIGHTS", "AUTHORS", "THANKS",
@@ -88,7 +98,7 @@ test_that("prune_bundled_r_runtime reports what it removed", {
   n <- length(regular_files(fixture_removed(root)))
   expect_message(
     prune_bundled_r_runtime(root, verbose = TRUE),
-    paste("Removed", n, "test and documentation files")
+    paste("Removed", n, "files that only serve tests, documentation or Tcl")
   )
   # Nothing left to remove the second time round, so nothing is reported.
   expect_silent(res <- prune_bundled_r_runtime(root, verbose = TRUE))

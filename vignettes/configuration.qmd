@@ -106,11 +106,13 @@ build:
   architectures:             # Target architectures
     - x64
     - arm64
+  compression: "normal"      # store, normal or maximum: installer size vs build time
+  electron_languages: [en-US]  # Chromium locale packs to ship; en-US is always kept
 
 dependencies:               # Runtime version pins and system packages
   r:
     version: null           # null = maintained pin; "latest" = live query; "4.6.1" = exact
-    prune: true             # Bundled only: remove package tests, R manuals and news
+    prune: true             # Bundled only: drop package tests, help, vignettes, Tcl and R manuals
   python:
     version: null           # null = maintained pin; "latest" = live query; "3.12.0" = exact
   electron:
@@ -238,8 +240,12 @@ The build process and its targets.
 | `runtime_strategy` | string | `"shinylive"` | How the app's runtime reaches the user (see below) |
 | `platforms` | list | Current platform | Target operating systems: `mac`, `win`, `linux` |
 | `architectures` | list | Current arch | Target CPU architectures: `x64`, `arm64` |
+| `compression` | string | electron-builder default | Installer compression: `store`, `normal` or `maximum` |
+| `electron_languages` | list | All locales | Chromium locale packs to ship, for example `[en-US, zh-CN]` |
 
 `export()` builds each listed platform for each listed architecture. Without `architectures`, every platform is built for the architecture of the machine running the build, so on an Apple Silicon Mac, `platforms: [win]` gives an arm64 Windows installer. The `platform` and `arch` arguments of `export()` override these lists, each only its own: with `architectures: [arm64]` in the file, `export(platform = "win")` builds Windows for arm64.
+
+`compression` and `electron_languages` control the size of the installer. `maximum` spends build time to shrink every installer; `electron_languages` only affects Chromium's own strings (context menus, native dialogs, DevTools), not the app's UI, so listing `[en-US, zh-CN]` removes about 45 MB of unused locale packs from an unpacked app. `en-US` is kept even when it is not listed, because Chromium falls back to it.
 
 **Valid `type` values:** `r-shiny` (an `app.R` or `ui.R`/`server.R` Shiny app) or `py-shiny` (an `app.py` Shiny for Python app).
 
@@ -362,7 +368,7 @@ These keys sit under `dependencies.r` and apply to the `bundled`, `auto-download
 | `r.packages` | list of strings | `[]` | R packages to install alongside the app |
 | `r.repos` | list of strings | `["https://cloud.r-project.org"]` | CRAN-compatible repository URLs to use when installing R packages |
 | `r.lib_path` | string | `null` | Custom library path where R packages are installed; `null` uses the default R library |
-| `r.prune` | boolean | `true` | Remove package test suites and R's own tests, manuals, and news from the embedded runtime (see below) |
+| `r.prune` | boolean | `true` | Remove test suites, help and vignette trees, message catalogues, Tcl/Tk and R's own manuals from the embedded runtime (see below) |
 | `r.local_packages` | list of strings | `[]` | Package source folders or `.tar.gz` source tarballs to install into a bundled R library; see [Local R packages](#local-r-packages) |
 
 #### Pruning the bundled R runtime
@@ -370,10 +376,15 @@ These keys sit under `dependencies.r` and apply to the `bundled`, `auto-download
 With the `bundled` strategy, shinyelectron trims the embedded R runtime after installing your packages, leaving out files that a running app does not use:
 
 - the test suites (`tests/`, `testme/`, `tinytest/`) of every installed package, including R's base and recommended packages;
+- the help and vignette trees (`help/`, `doc/`, `html/`) of every installed package;
+- the message catalogues that localize R's own messages (`po/` in each package, and the `translations` package);
+- the Tcl/Tk runtime under `Tcl/`, which only the `tcltk` package loads;
 - R's own regression tests;
 - R's PDF and HTML manuals and its news and FAQ files.
 
-Everything else stays. Package code, data, help pages, `examples/`, `demo/`, NEWS files, and `include/` headers are kept, because some packages and apps read them at runtime: `shinyjs::runExample()` reads its examples, a "What's new" panel may show a package's `NEWS.md`, and `Rcpp::sourceCpp()` needs the headers. R's license files (`COPYING`, and `COPYRIGHTS` with the notices that binary distributions of R must include), its author list, and the mirror lists that `utils::getCRANmirrors()` reads are kept too.
+Everything else stays. Package code, data, `examples/`, `demo/`, NEWS files, and `include/` headers are kept, because some packages and apps read them at runtime: `shinyjs::runExample()` reads its examples, a "What's new" panel may show a package's `NEWS.md`, and `Rcpp::sourceCpp()` needs the headers. R's license files (`COPYING`, and `COPYRIGHTS` with the notices that binary distributions of R must include), its author list, and the mirror lists that `utils::getCRANmirrors()` reads are kept too.
+
+Nothing a running app needs is removed: every package still loads and Shiny apps start exactly as before. What changes is documentation on demand. `?topic`, `example()`, `vignette()` and `tools::Rd_db()` report that nothing is installed, and `library(tcltk)` fails with "Tcl/Tk support files were not installed" instead of opening Tk windows. An app that shows help pages of its own must ship them inside the app, not read them from the R library. On a bundled R runtime this removes about 63 MB.
 
 Pruning is on by default. To ship the runtime exactly as installed, turn it off:
 

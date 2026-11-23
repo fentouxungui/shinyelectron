@@ -121,6 +121,17 @@ generate_package_json <- function(app_slug, app_version, backend, config,
   }
   build_config$files <- files
 
+  # Installer size controls from build.compression and
+  # build.electron_languages. as.list() keeps jsonlite's auto_unbox from
+  # turning a single locale code into a bare string, which electron-builder
+  # does not accept.
+  if (!is.null(config$build$compression)) {
+    build_config$compression <- config$build$compression
+  }
+  if (length(config$build$electron_languages)) {
+    build_config$electronLanguages <- as.list(config$build$electron_languages)
+  }
+
   # Unpack app files from ASAR so native R/Python/container backends
   # can access them on the real filesystem
   if (backend != "shinylive" || is_multi_app) {
