@@ -1320,8 +1320,6 @@ const storeBackends = new Map();
 let appWindow = null;
 let appWindowAppId = null;
 let appView = null;              // WebContentsView holding lifecycle/app content
-const APP_TOOLBAR_HEIGHT = 44;
-let appChromeState = { state: 'starting', message: 'Starting…' };
 let appWindowClosePromptOpen = false;
 // Set only when the USER closes the app window (not when a failed start or a
 // switch closes it). Used to avoid reporting a user-cancelled start as an error.
@@ -1657,14 +1655,8 @@ function layoutAppView() {
   if (!appWindowAlive() || !appView || appView.webContents.isDestroyed()) return;
   var size = appWindow.getContentSize();
   var width = Math.max(0, Math.round(size[0]));
-  var height = Math.max(0, Math.round(size[1] - APP_TOOLBAR_HEIGHT));
-  appView.setBounds({ x: 0, y: APP_TOOLBAR_HEIGHT, width: width, height: height });
-}
-function sendChromeStatus(ev) {
-  if (ev) appChromeState = ev;
-  if (appWindow && !appWindow.isDestroyed()) {
-    try { appWindow.webContents.send('app-chrome-status', appChromeState); } catch (e) { /* best effort */ }
-  }
+  var height = Math.max(0, Math.round(size[1]));
+  appView.setBounds({ x: 0, y: 0, width: width, height: height });
 }
 // Detach and close the app window without treating it as a user close: the
 // caller has already stopped (or is about to stop) the backend.
@@ -1706,7 +1698,6 @@ function ensureAppWindow(appId) {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
-      preload: path.join(__dirname, 'app-chrome-preload.js'),
       enableRemoteModule: false,
       webSecurity: true
     }
@@ -1714,9 +1705,9 @@ function ensureAppWindow(appId) {
   appWindow = win;
   appWindowAppId = appId;
 
-  // The BrowserWindow only hosts the slim toolbar; lifecycle and the app page
-  // live in a WebContentsView below it. The app's CSP, layout and z-index can
-  // no longer affect the shell controls.
+  // The BrowserWindow is an empty shell: the lifecycle page and the app page
+  // live in a WebContentsView that fills it, so the app's CSP, layout and
+  // z-index cannot affect the shell (window title, menu, close handling).
   var view = new WebContentsView({
     webPreferences: {
       nodeIntegration: false,
@@ -1738,11 +1729,10 @@ function ensureAppWindow(appId) {
   win.on('enter-full-screen', layoutAppView);
   win.on('leave-full-screen', layoutAppView);
 
-  appChromeState = { state: 'starting', message: 'Starting…' };
-  win.loadFile(path.join(__dirname, 'app-chrome.html'), { query: { theme: currentThemeMode } });
-  win.webContents.on('did-finish-load', function () {
-    if (appWindow === win) sendChromeStatus(appChromeState);
-  });
+  // An empty document: the app page in the view below is the only visible
+  // content, so the window shows no app name, progress, Store or Stop controls
+  // under its title bar. Closing the window is the way back to the store.
+  win.loadURL('about:blank');
 
   // macOS has one application-wide menu bar; Windows/Linux use per-window
   // menus so focus must not change the launcher's menu.
@@ -1761,13 +1751,13 @@ function ensureAppWindow(appId) {
     const msg = (e && e.message !== undefined) ? e.message : message;
     const isErr = lvl === 'error' || lvl === 'warning' ||
       (typeof lvl === 'number' && lvl >= 2);
-    log(isErr ? 'error' : 'info', `[app-chrome] ${msg}`);
+    log(isErr ? 'error' : 'info', `[app-shell] ${msg}`);
   });
   win.webContents.on('did-fail-load', (event, code, desc, url) => {
-    log('error', `[app-chrome] failed to load ${url}: ${desc} (${code})`);
+    log('error', `[app-shell] failed to load ${url}: ${desc} (${code})`);
   });
   win.webContents.on('render-process-gone', (event, details) => {
-    log('error', `[app-chrome] renderer gone: ${details && details.reason}`);
+    log('error', `[app-shell] renderer gone: ${details && details.reason}`);
   });
   view.webContents.on('console-message', (e, level, message) => {
     const lvl = (e && e.level !== undefined) ? e.level : level;
@@ -1783,7 +1773,7 @@ function ensureAppWindow(appId) {
     log('error', `[app-view] renderer gone: ${details && details.reason}`);
   });
 
-  // The app page owns the window title; the toolbar shell must not.
+  // The app page owns the window title; the empty shell document must not.
   view.webContents.on('page-title-updated', function (event, title) {
     var current = appMetaFor(appId) || {};
     var own = (current.name || appId || '').trim();
@@ -1989,7 +1979,6 @@ async function runStoreApp(appId) {
       if (appView && !appView.webContents.isDestroyed()) {
         appView.webContents.loadURL(openUrl).then(function () {
           setWindowTitleForApp(appId);
-          sendChromeStatus({ state: 'running', message: 'Running' });
         }).catch(function () {});
       }
     }
@@ -2004,7 +1993,6 @@ async function runStoreApp(appId) {
         if (appView && !appView.webContents.isDestroyed()) {
           appView.webContents.loadURL(liveUrl).then(function () {
             setWindowTitleForApp(appId);
-            sendChromeStatus({ state: 'running', message: 'Running' });
           }).catch(function () {});
         }
       }
@@ -2210,25 +2198,36 @@ async function showAboutDialog() {
   if (copyright) detailLines.push('', copyright);
   detailLines.push('', 'Built with shinyelectron');
   const detail = detailLines.join('\n');
-  // buttons[i] runs actions[i]; OK only closes the dialog.
-  const buttons = ['OK'];
-  const actions = [null];
+  // buttons[i] runs actions[i]. Every button closes the dialog, so there is no
+  // separate OK button: Esc and the window's close control dismiss it, and a
+  // build with nothing actionable keeps a plain Close instead.
+  const buttons = [];
+  const actions = [];
   {{#updates_enabled}}
   // The shell's own check is offered on Windows/Linux (a Mac build ships only
   // a dmg, which electron-updater cannot update); while a catalog app runs it
   // targets that app instead, so it is offered on every platform.
   if (process.platform !== 'darwin' || currentAppMeta) {
-    buttons.push(currentAppMeta ? 'Check for Updates' : 'Check for ShinyApps Updates');
+    buttons.push('Check for Updates');
     actions.push(checkForUpdatesInteractive);
   }
   {{/updates_enabled}}
   if (homepage) {
-    buttons.push('Visit Website');
+    // The homepage is the project's repository, so the button reads as a star
+    // action rather than a generic site link. The star is a \u2605 escape, which
+    // keeps this template plain ASCII.
+    buttons.push('\u2605 Star on GitHub');
     actions.push(() => shell.openExternal(homepage));
   }
   if (email) {
     buttons.push('Email');
     actions.push(() => shell.openExternal('mailto:' + email));
+  }
+  if (!buttons.length) {
+    // Windows labels an empty button list "OK", so keep a real dismissal
+    // button rather than letting one reappear.
+    buttons.push('Close');
+    actions.push(null);
   }
   const { response } = await dialog.showMessageBox(mainWindow, {
     type: 'info',
@@ -2236,12 +2235,14 @@ async function showAboutDialog() {
     message: name,
     detail,
     buttons,
-    defaultId: 0,
-    cancelId: 0,
+    // Electron reads -1 as "no such button": neither Enter nor Esc may pick the
+    // update check or the browser, since every button here does something.
+    defaultId: -1,
+    cancelId: -1,
     // Windows would otherwise show the extra buttons as command links.
     noLink: true
   });
-  if (actions[response]) await actions[response]();
+  if (response >= 0 && actions[response]) await actions[response]();
 }
 
   // Close the app window and stop its app, returning to the launcher. Used by
@@ -3104,10 +3105,6 @@ function createWindow() {
         ' version=' + (opts.runtimeVersion || '') +
         ' rscript=' + (opts.runtimeRscript || '') +
         ' library=' + (opts.runtimeLibrary || ''));
-      sendChromeStatus({
-        state: 'starting',
-        message: 'Starting ' + ((appMetaFor(opts.appId) || {}).name || opts.appId) + '…'
-      });
       var readyAt = 0;
       var reported = false;
       var reportLaunch = function (data, phase, summary, detail) {
@@ -3134,19 +3131,6 @@ function createWindow() {
         if (appWindow === win && appView === view && view && !view.webContents.isDestroyed()) {
           view.webContents.send('lifecycle-status', data);
         }
-        if (appWindow === win) {
-          if (data.phase === 'server_ready') {
-            sendChromeStatus({ state: 'starting', message: 'Starting app…' });
-          } else if (data.phase === 'stopping_server') {
-            sendChromeStatus({ state: 'stopping', message: 'Stopping…' });
-          } else if (data.phase === 'error' || data.phase === 'server_crashed') {
-            sendChromeStatus({ state: 'error', message: data.message || data.phase });
-          } else if (data.phase === 'app_exit') {
-            sendChromeStatus({ state: 'stopped', message: 'Stopped' });
-          } else {
-            sendChromeStatus({ state: 'starting', message: data.message || data.phase, percent: data.percent });
-          }
-        }
         if (data.phase === 'server_ready') { serverRunning = true; readyAt = Date.now(); }
         if (data.phase === 'error' || data.phase === 'server_crashed') {
           reportLaunch(data, data.phase, data.message, data.detail);
@@ -3172,7 +3156,6 @@ function createWindow() {
           storeBackends.delete(opts.appId);
           // The launcher no longer reloads when an app exits (its window is
           // separate), so tell the card that the app stopped.
-          if (appWindow === win) sendChromeStatus({ state: 'stopped', message: 'Stopped' });
           sendStoreStatus({ id: opts.appId, state: 'done', op: 'stop_app' });
           // The app ended on its own (not through Back to Launcher or Stop):
           // leave the now-dead page and show the launcher.
@@ -3203,7 +3186,6 @@ function createWindow() {
           storeBackends.delete(opts.appId);
           lastSelectedAppId = null;
           currentAppMeta = null;
-          if (appWindow === win) sendChromeStatus({ state: 'error', message: 'App crashed' });
           sendStoreStatus({ id: opts.appId, state: 'done', op: 'stop_app' });
           if (appWindow === win) closeAppWindow();
           {{#menu_enabled}}
@@ -3242,10 +3224,8 @@ function createWindow() {
         // its 'closed' handler stops that backend, so never navigate a dead
         // (or replaced) window here.
         if (appWindow === win && appView === view && view && !view.webContents.isDestroyed()) {
-          sendChromeStatus({ state: 'starting', message: 'Loading app…' });
           view.webContents.loadURL('http://localhost:' + actualPort).then(function () {
             setWindowTitleForApp(opts.appId);
-            sendChromeStatus({ state: 'running', message: 'Running' });
           }).catch(function () { /* navigation errors are reported elsewhere */ });
         }
         resolve({
@@ -3452,12 +3432,6 @@ function createWindow() {
     });
   }
 
-  // The app window's toolbar shell asks for the current app id/name here.
-  ipcMain.handle('app-window-info', () => {
-    var id = appWindowAppId || lastSelectedAppId || '';
-    var meta = id ? (appMetaFor(id) || {}) : {};
-    return { appId: id, name: meta.name || id || '' };
-  });
 
   ipcMain.handle('copy-download-link', async (_event, appId, mirror) => {
     try {
@@ -4216,7 +4190,6 @@ function createWindow() {
           if (appView && !appView.webContents.isDestroyed()) {
             appView.webContents.loadURL(openUrl).then(function () {
               setWindowTitleForApp(action.appId);
-              sendChromeStatus({ state: 'running', message: 'Running' });
             }).catch(function () {});
           }
         }
@@ -4335,28 +4308,16 @@ function createWindow() {
     {{/close_to_tray}}
     {{/tray_enabled}}
     {{^tray_enabled}}
-    if (!isShuttingDown && !app.isQuitting) {
-      const running = runningStoreApps();
-      if (running.length) {
-        event.preventDefault();
-        const { dialog } = require('electron');
-        const choice = dialog.showMessageBoxSync(mainWindow, {
-          type: 'warning',
-          buttons: ['Quit and stop apps', 'Cancel'],
-          defaultId: 1,
-          cancelId: 1,
-          title: 'Quit ' + shellDisplayName(),
-          message: running.length + ' app' + (running.length > 1 ? 's are' : ' is') + ' still running.',
-          detail: 'Quitting will stop: ' + running.join(', ') + '.'
-        });
-        if (choice === 0) {
-          isShuttingDown = true;
-          app.isQuitting = true;
-          var closeNow = function () { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close(); };
-          if (appStore) { appStore.stopAll().catch(function () {}).then(closeNow); } else { closeNow(); }
-        }
-        return;
-      }
+    if (!isShuttingDown && !app.isQuitting && hasActiveStoreWork()) {
+      event.preventDefault();
+      confirmQuitWithActiveWork().then(function (ok) {
+        if (!ok) return;
+        isShuttingDown = true;
+        app.isQuitting = true;
+        var closeNow = function () { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close(); };
+        if (appStore) { appStore.stopAll().catch(function () {}).then(closeNow); } else { closeNow(); }
+      }).catch(function () { /* keep the window open if the dialog fails */ });
+      return;
     }
     if (!isShuttingDown && serverRunning) {
       event.preventDefault();
@@ -4493,15 +4454,153 @@ app.on('window-all-closed', () => {
   app.quit();
 });
 
+// ---- Quit guard -------------------------------------------------------------
+// Quitting the store must never silently kill a running app or an install in
+// progress. Every quit path (menu Quit, tray Quit, the launcher's close dialog,
+// the lifecycle error screen, window-all-closed) ends in app.quit(), so one
+// before-quit handler covers them all. It is registered here, above the teardown
+// handlers at the end of this file, so a cancelled quit leaves the session
+// exactly as it was.
+let quitConfirmed = false;    // the user accepted losing the listed work
+let quitPromptOpen = false;   // the confirmation dialog is on screen
+
+// What the user would lose by quitting: running apps and the store tasks that
+// are still queued or installing. Labels are what the store shows, not ids.
+function activeStoreWork() {
+  var running = [];
+  var installing = [];
+  function pushName(list, label) {
+    label = String(label || '').trim();
+    if (label && list.indexOf(label) === -1) list.push(label);
+  }
+  function appName(id) {
+    if (!id) return '';
+    var meta = {};
+    try { meta = appMetaFor(id) || {}; } catch (e) { meta = {}; }
+    return meta.name || id;
+  }
+  if (appStore) {
+    try {
+      const st = appStore.getState() || {};
+      const apps = st.apps || {};
+      Object.keys(apps).forEach(function (id) {
+        var up = false;
+        try { up = appStore.isRunning(id); } catch (e) { up = false; }
+        if (up) pushName(running, appName(id));
+      });
+    } catch (e) { /* state not ready yet: nothing to report */ }
+  }
+  // A start that is still in flight has no store handle yet, but its backend
+  // process is just as much work to lose.
+  if (launchingAppId) pushName(running, appName(launchingAppId));
+  activeStoreTasks().forEach(function (t) {
+    var label = String(t.displayName || t.appId || '').trim();
+    if (!label) return;
+    var verb = t.op === 'update_app' ? 'updating'
+      : t.op === 'uninstall_app' ? 'uninstalling'
+      : 'installing';
+    if (typeof t.percent === 'number' && t.percent > 0) verb += ' ' + t.percent + '%';
+    pushName(installing, label + ' (' + verb + ')');
+  });
+  return { running: running, installing: installing };
+}
+function hasActiveStoreWork() {
+  var work = activeStoreWork();
+  return !!(work.running.length || work.installing.length);
+}
+// Running and installing are reported separately: they need different words
+// from the user ("stops" versus "cancels").
+function activeStoreWorkDetail(work) {
+  var rows = [];
+  if (work.running.length) {
+    rows.push('Running now:');
+    work.running.forEach(function (n) { rows.push('  - ' + n); });
+  }
+  if (work.installing.length) {
+    rows.push('Installing now:');
+    work.installing.forEach(function (n) { rows.push('  - ' + n); });
+  }
+  return rows.join('\n');
+}
+// The dialog belongs to the app window when one is open, else the launcher.
+function quitDialogParent() {
+  if (appWindowAlive()) return appWindow;
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  return null;
+}
+// Lists the work in progress and asks for an explicit force-quit confirmation.
+function confirmQuitWithActiveWork() {
+  var work = activeStoreWork();
+  var count = work.running.length + work.installing.length;
+  if (!count) return Promise.resolve(true);
+  const { dialog } = require('electron');
+  var appTitle = shellDisplayName();
+  var options = {
+    type: 'warning',
+    noLink: true,
+    title: 'Quit ' + appTitle + '?',
+    message: count === 1 ? '1 task is still in progress.' : count + ' tasks are still in progress.',
+    detail: activeStoreWorkDetail(work) +
+      '\n\nForce quitting stops the running apps, cancels the installs in progress and discards unsaved work.',
+    buttons: ['Quit anyway', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1
+  };
+  var parent = quitDialogParent();
+  var answer = parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+  return answer.then(function (res) { return !!res && res.response === 0; })
+    .catch(function () { return false; });
+}
+// Undo what the caller set before app.quit() so the store keeps running. If the
+// last window is already gone, bring one back instead of leaving a windowless
+// process the user cannot reach.
+function restoreWindowAfterCancelledQuit() {
+  isShuttingDown = false;
+  app.isQuitting = false;
+  if (mainWindow && !mainWindow.isDestroyed()) { showLauncherWindow(); return; }
+  if (appWindowAlive()) { appWindow.show(); appWindow.focus(); return; }
+  try { createWindow(); } catch (e) { log('warn', 'could not reopen the window after a cancelled quit:', e && e.message); }
+}
+// Confirmed force quit: abort installs first so their child processes and
+// half-written directories are not abandoned, but never let a slow abort hold
+// the quit - the process is going away either way.
+function finishPendingQuit() {
+  var aborted = null;
+  try { aborted = cancelAllStoreTasks(); } catch (e) { aborted = null; }
+  var cap = new Promise(function (resolve) { setTimeout(resolve, 3000); });
+  var proceed = function () {
+    try { if (appStore) appStore.stopAll(); } catch (e) { /* before-quit stops them too */ }
+    app.isQuitting = true;
+    app.quit();
+  };
+  if (aborted && typeof aborted.then === 'function') Promise.race([aborted, cap]).then(proceed, proceed);
+  else proceed();
+}
+app.on('before-quit', function (event) {
+  if (quitConfirmed || isShuttingDown) return;   // a confirmed shutdown is already under way
+  if (!hasActiveStoreWork()) return;
+  event.preventDefault();
+  if (quitPromptOpen) return;
+  quitPromptOpen = true;
+  confirmQuitWithActiveWork().then(function (ok) {
+    quitPromptOpen = false;
+    if (!ok) { restoreWindowAfterCancelledQuit(); return; }
+    quitConfirmed = true;
+    finishPendingQuit();
+  });
+});
+
 {{#tray_enabled}}
 {{#close_to_tray}}
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (event && event.defaultPrevented) return;
   app.isQuitting = true;
 });
 {{/close_to_tray}}
 {{/tray_enabled}}
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (event && event.defaultPrevented) return;
   // Quitting must not trigger the per-window "unsaved work" prompt.
   app.isQuitting = true;
   stopMetrics();
@@ -4511,6 +4610,7 @@ app.on('before-quit', () => {
 });
 
 // Multi-app: always stop running store apps on quit so no Shiny processes orphan.
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (event && event.defaultPrevented) return;
   if (appStore) { try { appStore.stopAll(); } catch (e) {} }
 });

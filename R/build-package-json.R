@@ -113,8 +113,7 @@ generate_package_json <- function(app_slug, app_version, backend, config,
              "src/**/*", "assets/**/*", "node_modules/**/*", "backends/**/*",
              "dockerfiles/**/*", "runtime/**/*")
   if (is_multi_app) {
-    files <- c(files, "src/apps/**/*", "apps-manifest.json", "launcher.html",
-               "app-chrome.html", "app-chrome-preload.js")
+    files <- c(files, "src/apps/**/*", "apps-manifest.json", "launcher.html")
     guide <- config$menu$user_guide
     if (!is.null(guide) && nzchar(guide)) {
       files <- c(files, basename(guide))

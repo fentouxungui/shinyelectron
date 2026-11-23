@@ -2,6 +2,12 @@
 
 ## Breaking changes
 
+* A running store app no longer shows a toolbar under its title bar. The app
+  page fills the whole window, so the app name, launch progress, Store button
+  and Stop button are gone. Close the app window (the unsaved-work prompt still
+  appears) to stop the app and return to the store; nothing changes for your
+  own app code.
+
 * shinyelectron now requires R 4.5.0 or newer, since it verifies downloaded
   runtimes with `tools::sha256sum()`, which was added in R 4.5.0. The README
   and `sitrep_electron_system()` now report this minimum. Apps built with the
@@ -51,7 +57,22 @@
   `app_check()` reports these problems too, and `wizard()` asks for a single
   platform when you choose the `bundled` or `auto-download` strategy.
 
+* Help > About drops its OK button. Check for Updates, Star on GitHub, and
+  Email each close the dialog, and so do Esc and the window's close control; a
+  build with none of those settings keeps a single Close button, because
+  Windows labels an empty button list "OK". The homepage button is now labeled
+  Star on GitHub instead of Visit Website, and the shell's own check reads
+  Check for Updates on the launcher, not Check for ShinyApps Updates.
+
 ## New features
+
+* Quitting the shell now checks for work still in progress. When any app is
+  running or any store task is still installing, it lists the running apps and
+  the installing apps separately and asks for an explicit "Quit anyway" before
+  it exits; Cancel keeps the session, its windows and its tasks untouched. Every
+  quit path (menu Quit, tray Quit, the launcher's close dialog, the lifecycle
+  error screen) goes through the same confirmation, and a confirmed force quit
+  cancels the pending installs before the process exits.
 
 * New `lifecycle.startup_timeout` sets how long, in milliseconds, an app waits
   for its R, Python, or container server to start (default 900000, fifteen
@@ -111,8 +132,8 @@
 
 * New `app.description`, `app.author`, `app.homepage`, and `app.copyright`
   settings describe the app. They fill the generated `package.json` and the
-  installer metadata, and Help > About shows them, with buttons to visit the
-  homepage or email the author. `app.author` takes an npm-style
+  installer metadata, and Help > About shows them, with buttons to open the
+  project on GitHub or email the author. `app.author` takes an npm-style
   `"Name <email> (url)"` string or a map with `name`, `email`, and `url`,
   and `app.homepage` must be an `http://` or `https://` URL. On macOS, the
   App menu's About panel shows the same name, version, copyright,

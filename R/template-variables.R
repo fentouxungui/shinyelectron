@@ -59,7 +59,7 @@ generate_template_variables <- function(app_name, app_slug, app_type,
   # container_image becoming {} instead of being absent).
   backend_config <- Filter(Negate(is.null), backend_config)
 
-  # The About dialog shows the app metadata; its Visit Website button opens
+  # The About dialog shows the app metadata; its Star on GitHub button opens
   # the homepage, and its Email button writes to the author's email.
   metadata <- app_metadata(config)
 

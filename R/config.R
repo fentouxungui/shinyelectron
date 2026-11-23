@@ -746,7 +746,7 @@ app:
   # Uncomment to describe the app in Help > About and the installer metadata
   # description: null        # null = "<slug> - Shiny Electron App"
   # author: null             # "Name <email> (url)", or a map of name, email, url
-  # homepage: null           # http:// or https:// URL for a Visit Website button
+  # homepage: null           # http:// or https:// URL for a Star on GitHub button
   # copyright: null          # e.g. "Copyright 2026 Example Inc."
 
 # Uncomment to configure logging (app.log_dir and app.log_level also work)

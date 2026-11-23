@@ -205,7 +205,7 @@ Application metadata.
 | `version` | string | `"1.0.0"` | Version number for the built application |
 | `description` | string | `null` | Shown in Help > About and written to the installer metadata; `null` uses `"<slug> - Shiny Electron App"` |
 | `author` | string or map | `null` | npm-style `"Name <email> (url)"`, where the email and URL are optional, or a map with `name`, `email`, and `url`. Help > About shows the name and, with an email, an Email button |
-| `homepage` | string | `null` | An `http://` or `https://` URL. Adds a Visit Website button to Help > About and a support link to the Windows uninstall entry |
+| `homepage` | string | `null` | An `http://` or `https://` URL. Adds a Star on GitHub button to Help > About and a support link to the Windows uninstall entry |
 | `copyright` | string | `null` | Shown in Help > About, the macOS About panel, and the Windows file properties; `null` lets electron-builder write a notice with the year and the author |
 
 Line breaks in `description`, `author`, and `copyright` become spaces, because the installer metadata holds a single line. The Windows installer script keeps the app name, the author's name, and the copyright in double-quoted strings, so their straight double quotes become typographic ones in the installer metadata, as electron-builder already does for the description. That script cannot hold a `$` at all: `export()` stops a Windows build when the app name, description, author, or copyright contains one, and warns when you build for other platforms. The same rule keeps electron-builder's `${...}` macros out of the copyright.

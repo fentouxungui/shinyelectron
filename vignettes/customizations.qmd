@@ -273,10 +273,11 @@ Buttons appear for the settings that apply:
 
 | Button | Shown when |
 |--------|------------|
-| OK | Always |
-| Check for Updates | `updates.enabled` is `true`, on Windows and Linux |
-| Visit Website | `app.homepage` is set |
+| Check for Updates | `updates.enabled` is `true` |
+| ★ Star on GitHub | `app.homepage` is set |
 | Email | `app.author` includes an email address |
+
+Every button does something and closes the dialog, so there is no OK button: Esc and the window's close control dismiss it too. A build with none of these settings keeps a single Close button, because Windows labels an empty button list "OK".
 
 Check for Updates answers in a dialog: the app is up to date, a newer version is ready to download (or already downloading when `updates.auto_download` is on), or the check failed, with the reason. It is left out on macOS, where a build ships only a disk image and electron-updater needs a zip archive to update the app.
 

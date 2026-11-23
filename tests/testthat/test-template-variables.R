@@ -504,15 +504,23 @@ test_that("unset or blank About metadata leaves its flag off", {
 
 test_that("the About dialog offers only the buttons that apply", {
   plain <- about_code(readLines(render_main_js(list())))
-  expect_false(any(grepl("buttons.push(", plain, fixed = TRUE)))
+  # Nothing is actionable, so only the dismissal button can show. The homepage
+  # and email branches stay in the code, since they test the app's metadata at
+  # runtime; the update check is dropped here because it is a template flag.
+  expect_false(any(grepl("Check for Updates", plain, fixed = TRUE)))
+  expect_true(any(grepl("buttons.push('Close')", plain, fixed = TRUE)))
+  expect_false(any(grepl("buttons = ['OK']", plain, fixed = TRUE)))
   expect_true(any(grepl("noLink: true", plain, fixed = TRUE)))
 
   full <- about_code(readLines(render_main_js(
     list(app = about_metadata(), updates = list(enabled = TRUE))
   )))
-  for (button in c("Check for Updates", "Visit Website", "Email")) {
-    expect_true(any(grepl(paste0("buttons.push('", button, "')"), full, fixed = TRUE)), info = button)
+  for (button in c("Check for Updates", "Star on GitHub", "Email")) {
+    expect_true(any(grepl(button, full, fixed = TRUE)), info = button)
   }
+  # The website link reads as a star action, and the shell-only wording is gone.
+  expect_false(any(grepl("Visit Website", full, fixed = TRUE)))
+  expect_false(any(grepl("Check for ShinyApps Updates", full, fixed = TRUE)))
   # The update check is not offered on macOS.
   guard <- grep("process.platform !== 'darwin'", full, fixed = TRUE)
   expect_length(guard, 1)
@@ -734,6 +742,11 @@ run_about_dialog <- function(config, platform) {
     "  const require = () => ({ dialog, shell });",
     "  const mainWindow = null;",
     "  const checkForUpdatesInteractive = async () => { done.push('check'); };",
+    # showAboutDialog() also reads the window it was opened from.
+    "  const appWindow = {};",
+    "  const appWindowAlive = () => true;",
+    "  const BrowserWindow = { getFocusedWindow: () => null };",
+    "  const currentAppMeta = null;",
     about,
     "  await showAboutDialog();",
     "  const actions = [];",
@@ -757,16 +770,17 @@ test_that("each About button runs its own action, and macOS has no update check"
   homepage <- "open https://example.org/it's?a=1&b=2"
   email <- "open mailto:jane@example.org"
 
+  # No OK button: every label does something, and the fallback dismisses.
   linux <- run_about_dialog(config, "linux")
-  expect_equal(linux$buttons, c("OK", "Check for Updates", "Visit Website", "Email"))
-  expect_equal(linux$actions, c("", "check", homepage, email))
+  expect_equal(linux$buttons, c("Check for Updates", "\u2605 Star on GitHub", "Email"))
+  expect_equal(linux$actions, c("check", homepage, email))
 
   mac <- run_about_dialog(config, "darwin")
-  expect_equal(mac$buttons, c("OK", "Visit Website", "Email"))
-  expect_equal(mac$actions, c("", homepage, email))
+  expect_equal(mac$buttons, c("\u2605 Star on GitHub", "Email"))
+  expect_equal(mac$actions, c(homepage, email))
 
   plain <- run_about_dialog(list(), "win32")
-  expect_equal(plain$buttons, "OK")
+  expect_equal(plain$buttons, "Close")
   expect_equal(plain$actions, "")
 })
 
